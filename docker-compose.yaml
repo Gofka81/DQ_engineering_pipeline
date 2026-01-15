@@ -66,7 +66,7 @@ services:
     entrypoint: /bin/bash
     command: -c 'airflow db init && airflow users create --username ${AIRFLOW_USER} --firstname Admin --lastname Admin --role Admin --email admin@example.com --password ${AIRFLOW_PASSWORD}'
     environment:
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,7 +82,7 @@ services:
     environment:
       _PIP_ADDITIONAL_REQUIREMENTS: "-r /requirements.txt"
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
       AIRFLOW__WEBSERVER__WEB_SERVER_HOST: 0.0.0.0
       AIRFLOW__WEBSERVER__WORKERS: 1
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -107,7 +107,7 @@ services:
     environment:
       _PIP_ADDITIONAL_REQUIREMENTS: "-r /requirements.txt"
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 10
       AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 60
