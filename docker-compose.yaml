@@ -72,7 +72,7 @@ services:
         condition: service_healthy
 
   airflow-webserver:
-    user: "1000:1000"
+    user: "1000:0"
     image: apache/airflow:2.10.2
     container_name: airflow-webserver
     restart: unless-stopped
@@ -97,7 +97,7 @@ services:
       - ./requirements.txt:/requirements.txt:ro
 
   airflow-scheduler:
-    user: "1000:1000"
+    user: "1000:0"
     image: apache/airflow:2.10.2
     container_name: airflow-scheduler
     restart: unless-stopped
