@@ -61,6 +61,7 @@ services:
     restart: unless-stopped
 
   airflow-init:
+    user: "1000:0"
     image: apache/airflow:2.10.5
     container_name: airflow-init
     entrypoint: /bin/bash
@@ -72,7 +73,7 @@ services:
         condition: service_healthy
 
   airflow-webserver:
-    user: "${AIRFLOW_UID:-50000}:0"
+    user: "1000:0"
     image: apache/airflow:2.10.5
     container_name: airflow-webserver
     restart: unless-stopped
@@ -97,7 +98,7 @@ services:
       - ./requirements.txt:/requirements.txt:ro
 
   airflow-scheduler:
-    user: "${AIRFLOW_UID:-50000}:0"
+    user: "1000:0"
     image: apache/airflow:2.10.5
     container_name: airflow-scheduler
     restart: unless-stopped
