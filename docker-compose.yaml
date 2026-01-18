@@ -2,9 +2,7 @@ version: '3.8'
 
 x-airflow-common:
   &airflow-common
-  build:
-    context: .
-    dockerfile: Dockerfile
+  image: airflow-custom:latest
   platform: linux/arm64
   environment:
     &airflow-common-env
