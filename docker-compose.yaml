@@ -22,7 +22,7 @@ x-airflow-common:
     AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 120
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
   volumes:
-    - ./dags:/opt/airflow/dags
+    - git-dags:/git:ro
     - ./logs:/opt/airflow/logs
     - ./config:/opt/airflow/config
     - ./plugins:/opt/airflow/plugins
@@ -243,6 +243,23 @@ services:
     depends_on:
       - kafka
     restart: unless-stopped
+
+  git-sync:
+    image: registry.k8s.io/git-sync/git-sync:v4.3.0
+    platform: linux/arm64
+    container_name: git-sync
+    environment:
+      GITSYNC_REPO: ${GIT_REPO_URL}
+      GITSYNC_BRANCH: ${GIT_BRANCH:-main}
+      GITSYNC_ROOT: ${GIT_PATH:-/git}
+      GITSYNC_DEST: repo
+      GITSYNC_PERIOD: 60s
+      GITSYNC_ONE_TIME: "false"
+      GITSYNC_MAX_FAILURES: 5
+    volumes:
+      - git-dags:/git
+    restart: unless-stopped
+
 
 volumes:
   postgres-data:
