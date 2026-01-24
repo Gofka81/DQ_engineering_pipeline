@@ -37,6 +37,7 @@ services:
   postgres:
     image: postgres:15-alpine
     platform: linux/arm64
+    container_name: postgres
     ports:
       - "5432:5432"
     environment:
@@ -67,6 +68,7 @@ services:
 
   airflow-webserver:
     <<: *airflow-common
+    container_name: airflow-webserver
     command: webserver
     ports:
       - "8080:8080"
@@ -84,6 +86,7 @@ services:
 
   airflow-scheduler:
     <<: *airflow-common
+    container_name: airflow-scheduler
     command: scheduler
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
@@ -97,8 +100,9 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  airflow-triggerer:
+  airflow-trigger:
     <<: *airflow-common
+    container_name: airflow-trigger
     command: triggerer
     healthcheck:
       test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
