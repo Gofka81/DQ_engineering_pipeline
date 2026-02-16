@@ -80,5 +80,5 @@ async def register_new_user(
     await db.commit()
     await db.refresh(new_user)
 
-    return UserRegisterOut.from_orm(new_user)
+    return UserRegisterOut.model_validate(new_user)
 

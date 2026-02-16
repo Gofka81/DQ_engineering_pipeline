@@ -17,7 +17,10 @@ class UserBase(BaseModel):
 
 
 class UserOut(UserBase):
+    id: int
     disabled: Optional[bool] = None
+
+    model_config = {"from_attributes": True}
 
 
 class UserInDB(UserOut):
@@ -36,5 +39,4 @@ class UserRegisterOut(BaseModel):
     email: EmailStr
     disabled: bool = False
 
-    class Config:
-        from_attributes = True  # allows .from_orm()
+    model_config = {"from_attributes": True}

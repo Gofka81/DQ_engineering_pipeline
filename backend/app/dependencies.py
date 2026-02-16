@@ -56,7 +56,7 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
 
-    return UserInDB.from_orm(user)
+    return UserInDB.model_validate(user)
 
 
 async def get_current_active_user(

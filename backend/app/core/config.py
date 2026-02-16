@@ -31,6 +31,22 @@ class Settings(BaseSettings):
     ALGORITHM: str = Field(default="HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=1440)
 
+    # MinIO
+    MINIO_ENDPOINT: str = Field(default="localhost:9000")
+    MINIO_ROOT_USER: str = Field(default="minioadmin")
+    MINIO_ROOT_PASSWORD: SecretStr = Field(default="minioadmin")
+    MINIO_RAW_BUCKET: str = Field(default="raw")
+    MINIO_CURATED_BUCKET: str = Field(default="curated")
+    MINIO_SECURE: bool = Field(default=False)
+
+    # File upload
+    MAX_FILE_SIZE_MB: int = Field(default=200)
+
+    # Redis
+    REDIS_HOST: str = Field(default="localhost")
+    REDIS_PORT: int = Field(default=6379)
+    REDIS_DQ_QUEUE: str = Field(default="dq_jobs")
+
     # Optional: full async DSN
     DATABASE_URL: Optional[PostgresDsn] = None
 

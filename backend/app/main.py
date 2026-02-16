@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends
 
 from backend.app.core.config import settings
 from backend.app.api.auth import router as auth_router
+from backend.app.api.files import router as files_router, runs_router
 from backend.app.dependencies import get_current_active_user
 from backend.app.schemas.auth import UserOut
 
@@ -14,6 +15,8 @@ app = FastAPI(
 
 
 app.include_router(auth_router, prefix="/api")
+app.include_router(files_router, prefix="/api")
+app.include_router(runs_router, prefix="/api")
 
 
 @app.get("/health")
