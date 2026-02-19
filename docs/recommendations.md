@@ -74,8 +74,9 @@ Numeric / date columns:
   "null_pct": 3.2,
   "stats": { "min": 20000, "max": 120000, "mean": 65000, "median": 60000, "std": 18500 },
   "outliers": { "count": 4, "method": "IQR" },
+  "invalid_count": 3,
   "detected_type": "numeric",
-  "pandas_dtype": "float64"
+  "pandas_dtype": "object"
 }
 ```
 
@@ -88,10 +89,13 @@ String / bool columns:
   "cardinality_pct": 4.2,
   "top_values": { "Engineering": 40, "Sales": 30, "HR": 15, "Finance": 10, "Legal": 5 },
   "pattern": null,
+  "invalid_count": 0,
   "detected_type": "string",
   "pandas_dtype": "object"
 }
 ```
+
+`invalid_count` is present on every column profile. It counts non-null values in an object-dtype column that will fail the schema cast and silently become NaN — for example, `"N/A"` in a column detected as numeric. Typed columns (`int64`, `float64`, `datetime64`) always have `invalid_count = 0` because pandas already validated them on read. String columns always have `invalid_count = 0` because any value is a valid string.
 
 ### Step 3 — Column type detection
 
@@ -106,7 +110,7 @@ Priority order:
 6. Try datetime coercion — if ≥80% of non-null values parse → `"date"`
 7. Otherwise → `"string"`
 
-The 80% threshold is intentional: real-world columns often have a few dirty values. A column that's 95% salaries and 5% `"N/A"` strings should still be treated as numeric. The invalid 5% is captured in `validity`.
+The 80% threshold is intentional: real-world columns often have a few dirty values. A column that's 95% salaries and 5% `"N/A"` strings should still be treated as numeric. The invalid 5% is captured in `validity` (dataset-level) and in each column's `invalid_count` (per-column), and a fill strategy is recommended for them — see [Handling minority invalid values](#handling-minority-invalid-values).
 
 Bool-like detection runs before numeric coercion because `pd.to_numeric` converts `True` → 1 and `False` → 0, which would misclassify a bool-with-nulls object column as numeric.
 
@@ -237,6 +241,28 @@ abs(max) / abs(min) > 100
 This means the values span more than two orders of magnitude (e.g., revenue in dollars alongside a percentage column). Normalization is **advisory** — the recommendations include the column name but the transform step requires explicit user approval before applying min-max or z-score scaling.
 
 The condition requires `min > 0` to avoid division by zero and to exclude columns that cross zero (where ratio-based normalization doesn't make sense).
+
+---
+
+## Handling Minority Invalid Values
+
+A column like `["1000", "2000", "3000", "N/A", "5000"]` is classified as `"numeric"` (80% parse successfully). The `"N/A"` value is not a true NaN — `null_count` is 0. But the moment the transform step applies `pd.to_numeric(..., errors="coerce")`, `"N/A"` silently becomes `NaN`.
+
+Without tracking this, the `missing_values` section would be empty (no nulls were detected), leaving that NaN with no fill plan.
+
+**How it works:**
+
+1. **Profile** — after detecting the column type, `profile_dataframe` runs the same coercion as the transform step would (`pd.to_numeric` for numeric, `pd.to_datetime` for date) and counts how many non-null values fail it. This is stored as `invalid_count` in the column profile.
+
+2. **Recommendations** — `build_recommendations` fires a fill strategy entry when `null_count > 0 OR invalid_count > 0`. The same `_fill_strategy` rules apply regardless of which triggered it (median for numeric, mode for bool/low-cardinality string, drop_row for dates/patterns).
+
+3. **Transform** — when casting, the result contains NaNs from both sources (original nulls + coercion failures). The fill strategy handles them all in one pass.
+
+**What we do NOT do:**
+
+- We don't drop the invalid rows at profile time — the user may disagree with the fill strategy and choose `drop_row` themselves.
+- We don't try to repair the invalid values (e.g. strip currency symbols). That's a custom transform, not a system default.
+- We don't raise an error — a column being 10% invalid is a data quality signal, not a pipeline failure.
 
 ---
 

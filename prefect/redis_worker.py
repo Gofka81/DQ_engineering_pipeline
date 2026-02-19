@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 
-import redis
+import redis.asyncio as aioredis
 from prefect.deployments import run_deployment
 
 # Configure logging
@@ -62,14 +62,14 @@ async def main():
 
     # Connect to Redis
     try:
-        redis_client = redis.Redis(
+        redis_client = aioredis.Redis(
             host=redis_host,
             port=redis_port,
             decode_responses=True,
         )
         await redis_client.ping()
         logger.info("Successfully connected to Redis")
-    except redis.ConnectionError as e:
+    except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}")
         sys.exit(1)
 
@@ -79,7 +79,7 @@ async def main():
     while True:
         try:
             # BRPOP blocks forever (timeout=0) until a job is available
-            result = redis_client.brpop(queue_name, timeout=0)
+            result = await redis_client.brpop(queue_name, timeout=0)
 
             if result:
                 _, job_json = result
