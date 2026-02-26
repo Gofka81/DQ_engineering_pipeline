@@ -18,6 +18,10 @@ def get_minio_raw_bucket() -> str:
     return os.environ.get("MINIO_RAW_BUCKET", "raw")
 
 
+def get_minio_curated_bucket() -> str:
+    return os.environ.get("MINIO_CURATED_BUCKET", "curated")
+
+
 async def get_pg_conn() -> asyncpg.Connection:
     """Create a PostgreSQL connection from environment variables."""
     return await asyncpg.connect(

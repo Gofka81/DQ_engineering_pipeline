@@ -34,3 +34,18 @@ deployments:
     work_queue_name: null
     job_variables: {}
   schedules: []
+
+- name: transform
+  version: null
+  tags:
+  - dq
+  - transform
+  concurrency_limit: 5
+  description: Transform flow - applies approved recommendations and saves cleaned file
+  entrypoint: flows/transform_flow.py:transform_flow
+  parameters: {}
+  work_pool:
+    name: default-agent-pool
+    work_queue_name: null
+    job_variables: {}
+  schedules: []

@@ -2,7 +2,7 @@ import uuid
 from io import BytesIO
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,11 +105,18 @@ async def upload_file(
     await db.refresh(db_run)
 
     # Push job to Redis queue for DQ analysis
-    redis.push_dq_job(
-        run_id=db_run.id,
-        file_id=db_file.id,
-        minio_path=minio_path,
-    )
+    try:
+        redis.push_job(
+            job_type="dq_analysis",
+            run_id=db_run.id,
+            file_id=db_file.id,
+            minio_path=minio_path,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analysis job could not be queued. Please try again.",
+        )
 
     return FileUploadResponse(
         id=db_file.id,
@@ -125,12 +132,16 @@ async def upload_file(
 async def list_files(
     db: AsyncSession = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
 ):
     """List all files uploaded by the current user."""
     result = await db.execute(
         select(FileModel)
         .where(FileModel.user_id == current_user.id)
         .order_by(FileModel.uploaded_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
     files = result.scalars().all()
     return files
@@ -199,8 +210,8 @@ async def get_file_status(
         run_id=run.id,
         file_id=run.file_id,
         status=run.status,
-        dq_score_before=run.dq_score_before,
-        dq_score_after=run.dq_score_after,
+        dq_scores_before=run.dq_scores_before,
+        dq_scores_after=run.dq_scores_after,
         error_message=run.error_message,
     )
 
@@ -259,6 +270,7 @@ async def update_recommendations(
     file_id: UUID,
     body: RecommendationsUpdate,
     db: AsyncSession = Depends(get_db),
+    redis: RedisService = Depends(get_redis_service),
     current_user: UserOut = Depends(get_current_active_user),
 ):
     """
@@ -298,20 +310,38 @@ async def update_recommendations(
             detail=f"Cannot update recommendations. Current status: {run.status}",
         )
 
-    # Update run with approved recommendations
-    run.recommendations_approved = body.recommendations
+    # Save approved recommendations and transition to TRANSFORMING
+    run.recommendations_approved = body.recommendations.to_flow_dict()
     run.status = RunStatus.TRANSFORMING
     await db.commit()
     await db.refresh(run)
 
-    # TODO: Trigger Prefect Transform flow here
+    # Fetch the raw file path so the transform flow can load the original CSV
+    file_result = await db.execute(
+        select(FileModel).where(FileModel.id == file_id)
+    )
+    file_record = file_result.scalar_one()
+
+    # Trigger transform flow via Redis
+    try:
+        redis.push_job(
+            job_type="transform",
+            run_id=run.id,
+            file_id=file_id,
+            minio_path=file_record.minio_raw_path,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Transform job could not be queued. Please try again.",
+        )
 
     return RunStatusResponse(
         run_id=run.id,
         file_id=run.file_id,
         status=run.status,
-        dq_score_before=run.dq_score_before,
-        dq_score_after=run.dq_score_after,
+        dq_scores_before=run.dq_scores_before,
+        dq_scores_after=run.dq_scores_after,
         error_message=run.error_message,
     )
 
