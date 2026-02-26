@@ -25,27 +25,40 @@ logging.basicConfig(
 logger = logging.getLogger("redis_worker")
 
 
-async def trigger_dq_flow(job: dict) -> None:
+_DEPLOYMENTS = {
+    "dq_analysis": "DQ Analysis/dq-analysis",
+    "transform":   "Transform/transform",
+}
+
+
+async def trigger_flow(job: dict) -> None:
     """
-    Trigger DQ Analysis Prefect deployment without waiting for completion.
+    Route job to the correct Prefect deployment by job_type.
 
     Args:
-        job: Dict with run_id, file_id, minio_path
+        job: Dict with job_type, run_id, file_id, minio_path
     """
+    job_type = job.get("job_type", "dq_analysis")
+    deployment = _DEPLOYMENTS.get(job_type)
+
+    if deployment is None:
+        logger.error(f"Unknown job_type: {job_type!r}. Skipping.")
+        return
+
     try:
         flow_run = await run_deployment(
-            name="DQ Analysis/dq-analysis",
+            name=deployment,
             parameters={
-                "run_id": job["run_id"],
-                "file_id": job["file_id"],
+                "run_id":     job["run_id"],
+                "file_id":    job["file_id"],
                 "minio_path": job["minio_path"],
             },
-            timeout=0,  # Don't wait for completion (fire and forget)
-            as_subflow=False,  # Not a subflow (standalone trigger)
+            timeout=0,      # fire and forget
+            as_subflow=False,
         )
-        logger.info(f"Successfully triggered flow run: {flow_run.id}")
+        logger.info(f"Triggered {job_type} flow run: {flow_run.id}")
     except Exception as e:
-        logger.error(f"Failed to trigger deployment: {e}", exc_info=True)
+        logger.error(f"Failed to trigger {job_type} deployment: {e}", exc_info=True)
         raise
 
 
@@ -54,7 +67,7 @@ async def main():
     # Get configuration from environment
     redis_host = os.getenv("REDIS_HOST", "redis")
     redis_port = int(os.getenv("REDIS_PORT", "6379"))
-    queue_name = os.getenv("REDIS_DQ_QUEUE", "dq_jobs")
+    queue_name = os.getenv("REDIS_JOBS_QUEUE", "jobs")
 
     logger.info(f"Redis worker starting...")
     logger.info(f"Redis: {redis_host}:{redis_port}")
@@ -85,10 +98,13 @@ async def main():
                 _, job_json = result
                 job = json.loads(job_json)
 
-                logger.info(f"Received job: run_id={job.get('run_id')}, file_id={job.get('file_id')}")
+                logger.info(
+                    f"Received job: type={job.get('job_type')} "
+                    f"run_id={job.get('run_id')}"
+                )
 
-                # Trigger the Prefect deployment
-                await trigger_dq_flow(job)
+                # Route to the correct Prefect deployment
+                await trigger_flow(job)
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to decode job JSON: {e}")
