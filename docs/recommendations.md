@@ -1,304 +1,412 @@
 # Data Quality Recommendations
 
-How the pipeline generates, structures, and uses recommendations — and why each decision was made.
+This document defines every recommendation type the pipeline produces, the business rules behind each one, and which decisions are made by code vs the LLM.
 
 ---
 
-## Purpose
+## Framework — DQ Dimensions
 
-When a user uploads a CSV, the system produces a **recommendations JSON** that tells the transform step what to do with the data. The recommendations answer three questions:
+The pipeline is structured around the six practitioner dimensions of data quality from **DAMA DMBOK** (Data Management Body of Knowledge) — the standard used by working data engineers. These six dimensions overlap with the "inherent" data quality characteristics defined in **ISO/IEC 25012**, though ISO/IEC 25012 defines 15 characteristics in total; we implement four of them.
 
-1. What does this data look like? (schema inference)
-2. What's wrong with it? (missing values, duplicates, type inconsistencies)
-3. How should it be fixed? (fill strategy, deduplication, normalization)
+> **Note on ISO 8000:** ISO 8000 governs data quality for supply-chain master data (GDSN product records, asset registers). It is not applicable to general-purpose CSV profiling. The earlier citation of "ISO 8000 alignment" in this project's documentation was inaccurate and has been corrected.
 
-The goal is to make the user's job as a data engineer easier: they review the JSON, tweak anything they disagree with, and the system applies the transforms — reproducibly, without manual scripting.
+> **Scope disclaimer:** This pipeline adopts practitioner interpretations of DAMA DMBOK dimensions. It is not ISO-certified and does not implement full standard compliance. Every threshold (50% null, IQR 1.5×, cardinality 10%, 80% MAR correlation) is a configurable heuristic, not a statistically universal rule. Rules labelled "deterministic" are reproducible code rules; rules labelled "heuristic" are calibrated defaults that may not generalise to all domains.
 
----
+Each dimension maps to one or more recommendation types. The "Implementation scope" column is an honest statement of what the pipeline currently checks.
 
-## Pipeline Position
-
-```
-parse_csv → profile_dataframe → score_profile → build_recommendations
-                                                         ↓
-                                             Stored in runs.recommendations_generated (JSONB)
-                                                         ↓
-                                             User reviews via GET /api/files/{id}/recommendations
-                                                         ↓
-                                             User approves/edits via PUT (stored in recommendations_approved)
-                                                         ↓
-                                             Transform flow applies approved recommendations
-```
-
-Recommendations are generated once, stored in PostgreSQL, and never regenerated unless the user re-runs the DQ flow. The approved copy is kept separately from the generated copy so the system can always diff them.
+| Dimension | What it measures | Recommendation types | Implementation scope |
+|---|---|---|---|
+| **Completeness** | Missing / null values | Missing values strategies | Null ratio at value level only. Does not check population completeness (missing rows) or column-level completeness against a schema. |
+| **Validity** | Values that violate domain rules | Sentinel detection, type recast, outliers | Type mismatches on `object`-dtype columns only. Native `int`/`float` columns are not range-validated. Sentinel detection for string columns only (numeric sentinels like `-999` are a known gap). |
+| **Uniqueness** | Duplicate records | Duplicate handling | Exact row duplicates only. Fuzzy / near-duplicate matching is a known gap. |
+| **Consistency** | Format regularity within a column | Type recast, date standardisation | Within-column format patterns (mixed date formats, email pattern matching). Cross-column rule validation ("end_date > start_date") is a known gap. |
+| **Accuracy** | Values match reality | (none — requires ground truth) | Out of scope. |
+| **Timeliness** | Data staleness | (none) | Out of scope. |
 
 ---
 
-## How Recommendations Are Built
+## 1. Completeness — Missing Values
 
-### Step 1 — Parse
+Missing data is classified by its mechanism before a strategy is chosen. The mechanism determines whether imputation is safe or whether it would destroy a signal in the data.
 
-`parse_csv(stream)` reads the CSV via pandas with `on_bad_lines` wired to a counter. Malformed rows (wrong field count) are skipped rather than raising. The count is passed downstream so it appears in the profile.
+### Missing Data Mechanisms (MCAR / MAR / MNAR)
 
-### Step 2 — Profile
+| Mechanism | What it means | How we detect it | Correct treatment |
+|---|---|---|---|
+| **MCAR** — Missing Completely At Random | Nulls have no pattern. The scale ran out of batteries. | Little's test / no correlation found | Safe to impute |
+| **MAR** — Missing At Random | Nulls correlate with an *observed* column. ATM rows → no merchant name. | Statistical correlation check (see below) | `leave_null` — imputing destroys the signal |
+| **MNAR** — Missing Not At Random | Nulls correlate with an *unobserved* value. High earners skip salary field. | Cannot detect from data alone — needs domain reasoning | `leave_null` — inferred by LLM from column name + context |
 
-`profile_dataframe(df, malformed_rows)` produces objective facts — no strategy decisions, no LLM. It returns:
+**MAR detection (code):** For each nullable column, the pipeline checks whether its null rows cluster on a specific value in another column (≥80% of nulls appear when column B = value V, and V is not the majority value of B overall). If detected, `leave_null` is applied directly in the baseline — this is a statistical fact, not an LLM decision.
 
-**Dataset-level stats**
+**MNAR detection (LLM):** When a column is >50% null and its name suggests a sparse-by-design attribute (`adv_evt_dt`, `resolved_at`, `conv_dt`, `incident_dt`), the LLM overrides `drop_column` to `leave_null` using semantic reasoning about the column's domain role.
 
-| Field | What it measures |
-|---|---|
-| `total_rows`, `total_columns`, `total_cells` | Shape |
-| `missing_cells` | NaN count across all cells |
-| `duplicate_rows` | Exact full-row duplicates |
-| `malformed_rows` | Rows skipped during CSV parse |
-| `invalid_cells` | Cells in object columns that don't conform to the column's dominant type |
+### Decision Precedence Hierarchy
 
-**DQ score inputs** (see [DQ Score](#dq-score))
+When multiple rules could apply to a column, this is the explicit priority order — higher rows win:
 
-| Field | Calculation |
-|---|---|
-| `completeness` | `(1 - missing_cells / total_cells) * 100` |
-| `uniqueness` | `(1 - duplicate_rows / total_rows) * 100` |
-| `validity` | `(type_conforming_cells / total_cells) * 100` |
-| `consistency` | `(pattern_matching_cells / total_cells) * 100` |
+| Priority | Rule | Owner | Can be overridden by |
+|---|---|---|---|
+| 1 | MAR detection — nulls cluster on a specific value in another column → `leave_null` | Code (todo 1.3 — not yet in baseline) | User only |
+| 2 | ≥50% null → `drop_column` | Code | LLM (MNAR only — event/optional columns), User |
+| 3 | Type-based rules (ID/pattern → `drop_row`, numeric → `median`, etc.) | Code | LLM, User |
+| 4 | LLM semantic override (MNAR `leave_null`, `rename_to`) | LLM | User |
+| 5 | User edit of recommendations JSON | User | Nothing |
 
-**Per-column profiles** (`column_profiles`)
+**What the LLM can and cannot do:**
+- The LLM **can** override `drop_column` → `leave_null` for event-date or optional-attribute columns (MNAR case). This is intentional.
+- The LLM **cannot** invent new strategies — the validator enforces a fixed `_VALID_STRATEGIES` set.
+- The LLM **cannot** change `_metadata`, `duplicates`, or `custom_transforms` — these are always taken from the baseline.
+- The LLM **cannot** override a column that has zero nulls with an imputation strategy — a post-processing guard strips this.
 
-Each column gets a profile dict. The structure depends on the detected type:
+---
 
-Numeric / date columns:
-```json
-{
-  "null_count": 12,
-  "null_pct": 3.2,
-  "stats": { "min": 20000, "max": 120000, "mean": 65000, "median": 60000, "std": 18500 },
-  "outliers": { "count": 4, "method": "IQR" },
-  "invalid_count": 3,
-  "detected_type": "numeric",
-  "pandas_dtype": "object"
-}
-```
+### Strategy Selection Rules (applied in order)
 
-String / bool columns:
-```json
-{
-  "null_count": 0,
-  "null_pct": 0.0,
-  "unique_count": 5,
-  "cardinality_pct": 4.2,
-  "top_values": { "Engineering": 40, "Sales": 30, "HR": 15, "Finance": 10, "Legal": 5 },
-  "pattern": null,
-  "invalid_count": 0,
-  "detected_type": "string",
-  "pandas_dtype": "object"
-}
-```
-
-`invalid_count` is present on every column profile. It counts non-null values in an object-dtype column that will fail the schema cast and silently become NaN — for example, `"N/A"` in a column detected as numeric. Typed columns (`int64`, `float64`, `datetime64`) always have `invalid_count = 0` because pandas already validated them on read. String columns always have `invalid_count = 0` because any value is a valid string.
-
-### Step 3 — Column type detection
-
-`_detect_column_type(series)` runs on every column to assign a semantic type used throughout profiling and recommendations.
-
-Priority order:
-1. If pandas already parsed as int/float → `"numeric"`
-2. If pandas parsed as bool → `"bool"`
-3. If pandas parsed as datetime → `"date"`
-4. Object columns: check for bool-like values (`"true"/"false"/True/False`) → `"bool"`
-5. Try numeric coercion — if ≥80% of non-null values parse → `"numeric"`
-6. Try datetime coercion — if ≥80% of non-null values parse → `"date"`
-7. Otherwise → `"string"`
-
-The 80% threshold is intentional: real-world columns often have a few dirty values. A column that's 95% salaries and 5% `"N/A"` strings should still be treated as numeric. The invalid 5% is captured in `validity` (dataset-level) and in each column's `invalid_count` (per-column), and a fill strategy is recommended for them — see [Handling minority invalid values](#handling-minority-invalid-values).
-
-Bool-like detection runs before numeric coercion because `pd.to_numeric` converts `True` → 1 and `False` → 0, which would misclassify a bool-with-nulls object column as numeric.
-
-### Step 4 — Outlier detection
-
-Only run when a numeric column has ≥30 non-null values. Below that threshold the IQR method is statistically unreliable. Outliers are **advisory only** — they are not penalised in the DQ score and the recommendations do not prescribe a fix. The count is surfaced so the user can decide.
-
-### Step 5 — Pattern detection
-
-`_PATTERNS` is a dict of compiled regexes for common structured formats:
-
-| Pattern | Used for |
-|---|---|
-| `email` | Email addresses |
-| `date_iso` | `YYYY-MM-DD` strings |
-| `phone` | International phone numbers |
-| `url` | HTTP/HTTPS URLs |
-| `postcode_uk` | UK postcodes |
-| `uuid` | UUIDs |
-
-**Ordering matters:** `date_iso` is checked before `phone` because ISO dates (`2021-03-15`) match the phone regex (digits + hyphens). First match wins.
-
-A pattern is considered dominant if >50% of non-null values match. This feeds both the `consistency` DQ metric and the `_fill_strategy` logic.
-
-### Step 6 — Score
-
-`score_profile(profile)` computes the DQ score as a weighted average:
-
-| Component | Weight | Rationale |
+| Condition | Strategy | Rationale |
 |---|---|---|
-| Completeness | 35% | Missing data is the most common and costly data quality problem |
-| Uniqueness | 25% | Duplicate rows silently inflate counts and skew aggregates |
-| Validity | 25% | Type violations cause downstream pipeline failures |
-| Consistency | 15% | Format inconsistency matters but is often recoverable |
+| Nulls correlate with another column's value (MAR) | `leave_null` | Nulls carry structural information — imputing removes it |
+| Column is ≥50% null AND not MAR | `drop_column` | More than half the column is missing — imputation would fabricate the majority of the data |
+| ID / key column (`*_id`, `*_key`, `*_code`, high cardinality) | `drop_row` | Identifiers are unique — any imputed value is fabricated |
+| Pattern column (email, phone, UUID, URL — detected by regex) | `drop_row` | Structured values cannot be invented |
+| Numeric column — skewed (IQR outliers present, or \|mean − median\| / std > 0.15) | `median` | Median is robust to outliers; mean is pulled by extreme values |
+| Numeric column — symmetric (no outliers, mean ≈ median) | `mean` | Mean is the efficient estimator when distribution is symmetric |
+| Bool column | `mode` | Fill with the more common true/false |
+| Date column (non-event, no MAR signal) | `drop_row` | Cannot invent a date without domain knowledge |
+| String column — low cardinality (<10% unique values) | `mode` | Likely categorical — fill with most frequent value |
+| String column — high cardinality (≥10% unique values) | `drop_row` | Likely an ID or free-text name — imputation fabricates data |
 
-Score is rounded to 2 decimal places and stored as `dq_score_before` in the run record.
+The `drop_column` rule (≥50%) is checked first and overrides type-based rules.
 
-### Step 7 — Build recommendations
+### Available Strategies (full list)
 
-`build_recommendations(profile, dq_score)` converts the profiled facts into actionable instructions.
+| Strategy | Auto-recommended | Effect |
+|---|---|---|
+| `median` | Yes — symmetric numeric | Fill nulls with column median |
+| `mean` | Yes — skewed numeric | Fill nulls with column mean |
+| `mode` | Yes — bool, low-cardinality string | Fill nulls with the most frequent value |
+| `fill` | User / LLM only | Fill nulls with a literal value (e.g. `0`, `"unknown"`) |
+| `drop_row` | Yes — ID, pattern, date, high-cardinality string | Drop the row where this column is null or invalid |
+| `drop_column` | Yes — ≥50% missing, not MAR | Remove the entire column |
+| `leave_null` | Code (MAR), LLM (MNAR), or user | Keep nulls as-is — no fill, no rows dropped |
 
 ---
 
-## Recommendations JSON Schema
+## 2. Validity — Sentinel Values
+
+**Sentinel values** are special values stored in a column to represent "no data" or "not applicable" rather than using a proper null. Examples: `-999` in a temperature column, `"N/A"` or `"unknown"` in a string column, `99` in an age column meaning "not recorded".
+
+These are **validity issues, not completeness issues** — the cell is not null, but the value is invalid for the column's domain. Treating them as valid data biases statistics and corrupts imputation.
+
+### Detection
+
+The profiler detects sentinel patterns and reports them as `invalid_count` per column:
+- String sentinels: `"N/A"`, `"n/a"`, `"NA"`, `"none"`, `"null"`, `"unknown"`, `"undefined"`, `"-"`, `"?"`, `""`
+- Numeric sentinels: values that are implausibly extreme for the column's distribution (e.g. `-999`, `9999`, `99`) and appear with suspiciously high frequency
+- Sample rows surfaced to the LLM so it can spot domain-specific patterns
+
+### Recommendation
+
+When `invalid_count > 0` for a column, the recommendation flags the column with a `warning` describing the sentinel pattern. The user decides whether to convert sentinels to null (then impute) or filter the rows. **Automatic conversion is not applied** — sentinel replacement is a destructive operation that requires user confirmation.
+
+---
+
+## 3. Validity — Type Recast and Date Standardisation
+
+For every column: infer the correct type from the actual values and recommend a cast if the stored type differs.
+
+| Rule | Inferred type |
+|---|---|
+| All non-null values are whole numbers | `int` |
+| Numeric values with decimals present | `float` |
+| ≥80% of string values parse as ISO 8601 date or common date format | `date` |
+| Values are only true/false variants (`true`, `false`, `1`, `0`, `yes`, `no`) | `bool` |
+| Everything else | `string` |
+| `nullable: true` | Column has any nulls or invalid cells |
+
+**Date standardisation:** When a column is recast to `date`, the transform pipeline normalises all values to ISO 8601 format (`YYYY-MM-DD`). Columns storing dates as `"2003/01/15"`, `"15-01-2003"`, or `"Jan 15, 2003"` are all standardised to `"2003-01-15"` on transform.
+
+---
+
+## 4. Validity — Outliers
+
+Outliers are values that are statistically extreme relative to the column's distribution. They are profiled per column and an `outliers` section is generated in the recommendations. The default strategy is `keep` — the user must explicitly change it to `winsorise`, `remove`, or `cap` to apply treatment. The selected strategy is then applied during the transform step.
+
+**Scope constraint:** IQR detection is univariate — it evaluates each column independently. It does not detect multivariate anomalies (e.g. an unusual combination of age + salary). It is not a fraud or anomaly detection method.
+
+**Minimum sample:** IQR bounds are only computed when a column has ≥ 30 non-null values. For smaller columns the outlier count is 0 and no `outliers` entry is generated — this is a known limitation for small datasets.
+
+### Detection Methods
+
+| Method | When to use | Threshold | Implemented |
+|---|---|---|---|
+| **IQR (Interquartile Range)** | Skewed distributions (most real-world data) | Below Q1 − 1.5×IQR or above Q3 + 1.5×IQR | ✓ |
+| **Z-score** | Normally distributed data | \|z\| > 3 (i.e. >3 standard deviations from mean) | Not yet |
+
+The pipeline uses IQR by default (more robust for skewed data). The outlier count reported in the profile is IQR-based.
+
+### Treatment Options (user selects)
+
+| Strategy | Effect | When appropriate |
+|---|---|---|
+| `keep` | No action — outliers remain | When outliers are real rare events (fraud, sensor spikes) |
+| `winsorise` | Cap at the nearest non-outlier boundary (Q3 + 1.5×IQR or Q1 − 1.5×IQR) | Preserves row count; reduces extreme influence on models |
+| `remove` | Drop rows where the column value is an outlier | Only when outliers are confirmed data entry errors |
+| `cap` | Cap at user-defined min/max | When domain bounds are known (e.g. human age: 0–120) |
+
+**Domain violations** (age = -1, temperature = -999) are a **validity** issue (sentinel value), not a statistical outlier — see section 2 above.
+
+---
+
+## 5. Uniqueness — Duplicates
+
+### Row-Level (Exact Duplicates)
+
+Exact duplicate rows (every column identical) are always unintentional in a clean dataset. They arise from import errors, double-submission, or ETL bugs.
+
+| Option | Effect |
+|---|---|
+| `drop` — keep `first` | Keep the first occurrence, drop subsequent |
+| `drop` — keep `last` | Keep the last occurrence, drop earlier ones |
+| `ignore` | User confirms the duplicates are intentional (e.g. log table with repeated events) |
+
+`subset` can be specified (list of columns to check) — duplicate on key columns only, not all columns.
+
+The recommendation defaults to `drop / keep: first` when any exact duplicates are detected.
+
+### Fuzzy / Near-Duplicates
+
+Records representing the same entity but with slight variation ("John Doe" vs "Jon Doe", "123 Main St" vs "123 Main Street") are **not detected automatically** — fuzzy matching requires domain-specific similarity thresholds and identity resolution logic. This is out of scope for the current pipeline but noted as a known gap.
+
+---
+
+## 6. Usability — Normalization / Standardisation
+
+Normalisation scales numeric column values so they are comparable across different ranges. It is relevant beyond machine learning:
+
+- **ML models**: distance-based algorithms (k-means, SVM, KNN) are biased toward high-range features without scaling
+- **Cross-feature comparison**: salary (0–500K) and age (0–100) cannot be aggregated or compared without scaling
+- **Clustering and PCA**: assume features on comparable scales
+- **Multi-source data**: standardise measurements from different instruments or collection sites
+
+### When recommended
+
+For numeric columns where `col_max_abs > 100` AND the column has a non-zero range: suggest normalisation. `col_max_abs = max(|min|, |max|)` — handles zero-min and negative-min columns correctly (previous ratio approach `max/min > 100` failed for those).
+
+### Methods
+
+| Method | Effect | When to prefer | Implemented |
+|---|---|---|---|
+| **Min-max** [0, 1] | Scales to fixed range | When distribution bounds are known and outliers are few | ✓ |
+| **Z-score** (standardisation) | Mean=0, std=1 | When outliers are present or distribution is unknown | Not yet |
+
+**Current implementation:** Only min-max is applied. The `normalize: true` field triggers min-max scaling. Z-score is documented for future implementation (todo 4.4).
+
+Advisory only — the user reviews the recommendation in the JSON and may reject it by setting `normalize: false`.
+
+---
+
+## 7. Metadata — Column Renaming
+
+Column renaming is a **metadata quality** improvement. It does not change data values but makes the dataset more readable and self-documenting.
+
+The LLM identifies three rename scenarios:
+
+| Scenario | Example | Signal |
+|---|---|---|
+| **Abbreviation** | `sal` → `salary`, `dept_cd` → `department_code` | Column name is short and cryptic, clearly abbreviates a known word |
+| **Semantic clarification** | `name` (containing "John Smith") → `full_name` | Sample values reveal the column's true meaning |
+| **Incorrect name** | Column called `age` containing values like `2003-01-15` | Type detection and sample values contradict the column name — treated as type recast first, rename second |
+
+Rename suggestions are **user-facing proposals**, not enforced. The user reviews them in the recommendations JSON and may keep or discard each one. The no-op guard (stripping `rename_to` when the new name equals the original) is the only hard enforcement.
+
+---
+
+## 8. LLM Enrichment — Scope and Boundary
+
+After the code generates the baseline recommendations, an LLM (Groq — llama-3.3-70b-versatile) reviews column profiles and sample rows to improve them.
+
+### What the LLM decides (semantic decisions only)
+
+| Task | Why LLM | Why not code |
+|---|---|---|
+| MNAR `leave_null` | Column name + domain context required — cannot detect from statistics | Cannot determine from data patterns alone |
+| `rename_to` suggestions | Requires reading sample values and understanding semantic meaning | No deterministic mapping from abbreviation to full name |
+| `note` — plain-English explanation | Requires natural language generation | Not a code concern |
+
+### What code decides (deterministic decisions)
+
+| Task | Why code |
+|---|---|
+| MAR `leave_null` (correlated nulls) | Statistical fact — correlate null rows with other column values |
+| Median vs mean selection | Computable from skewness statistics in the profile |
+| Mode selection for categoricals | Computable from cardinality_pct |
+| Drop row for ID/pattern columns | Column name pattern + cardinality + regex detection |
+| Drop column threshold (≥50% null) | Arithmetic |
+| Type inference | Syntactic parsing |
+| Normalization flag | Range comparison |
+| Sentinel detection | Pattern matching |
+
+### Post-processing guards (applied after LLM response)
+
+Even within the LLM's scope, four deterministic guards are applied to catch predictable failure modes:
+
+1. **Strip echoed keys** — remove any key the LLM returned identical to the baseline
+2. **Strip `missing_values` when baseline has none** — zero-null columns do not need imputation
+3. **Strip no-op renames** — `rename_to` equal to the column name is meaningless
+4. **Drop note-only columns** — a column with only a `note` and no substantive change is noise
+
+### Fallback
+
+If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry attempts fail, the code-generated baseline is returned unchanged.
+
+---
+
+## Complete Example JSON
 
 ```json
 {
-  "schema": {
-    "<column>": {
-      "type": "int | float | string | date | bool",
-      "nullable": true
-    }
-  },
-  "missing_values": {
-    "<column>": {
-      "strategy": "median | mean | mode | fill | drop_row",
-      "value": null
+  "columns": {
+    "customer_id": {
+      "type":           "string",
+      "nullable":       false,
+      "missing_values": null,
+      "normalize":      false,
+      "warning":        null,
+      "note":           null
+    },
+    "age": {
+      "type":           "int",
+      "nullable":       true,
+      "missing_values": { "strategy": "median", "value": 34 },
+      "normalize":      false,
+      "warning":        null,
+      "note":           null
+    },
+    "salary": {
+      "type":           "float",
+      "nullable":       true,
+      "missing_values": { "strategy": "mean", "value": null },
+      "normalize":      true,
+      "warning":        null,
+      "note":           "Distribution is symmetric — mean is appropriate; consider z-score normalization for ML use."
+    },
+    "joined_at": {
+      "type":           "date",
+      "nullable":       true,
+      "missing_values": { "strategy": "drop_row", "value": null },
+      "normalize":      false,
+      "warning":        "drop_row will remove up to 3 rows (1.5% of dataset) where 'joined_at' is null",
+      "note":           null
+    },
+    "is_active": {
+      "type":           "bool",
+      "nullable":       true,
+      "missing_values": { "strategy": "fill", "value": false },
+      "normalize":      false,
+      "warning":        null,
+      "note":           "Defaulting to inactive — safer assumption for records with no known activity"
+    },
+    "email": {
+      "type":           "string",
+      "nullable":       true,
+      "missing_values": { "strategy": "drop_row", "value": null },
+      "normalize":      false,
+      "warning":        "drop_row will remove up to 8 rows (4.0% of dataset) where 'email' is null or invalid",
+      "note":           null
+    },
+    "department": {
+      "type":           "string",
+      "nullable":       true,
+      "missing_values": { "strategy": "mode", "value": "Engineering" },
+      "normalize":      false,
+      "warning":        null,
+      "note":           null
+    },
+    "adv_evt_dt": {
+      "type":           "date",
+      "nullable":       true,
+      "missing_values": { "strategy": "leave_null", "value": null },
+      "normalize":      false,
+      "warning":        null,
+      "note":           "74% null — adverse event dates are null for patients who had no adverse event. Nulls are intentional and clinically meaningful."
+    },
+    "merchant_nm": {
+      "type":           "string",
+      "nullable":       true,
+      "missing_values": { "strategy": "leave_null", "value": null },
+      "normalize":      false,
+      "warning":        null,
+      "note":           "Nulls correlate with txn_typ=atm (100% of nulls). ATM transactions have no merchant — structural null."
+    },
+    "sparse_col": {
+      "type":           "string",
+      "nullable":       true,
+      "missing_values": { "strategy": "drop_column", "value": null },
+      "normalize":      false,
+      "warning":        "drop_column will remove the entire 'sparse_col' column (62% of values are missing)",
+      "note":           null
     }
   },
   "duplicates": {
     "strategy": "drop",
-    "subset": [],
-    "keep": "first"
+    "subset":   [],
+    "keep":     "first"
   },
-  "normalization": {
-    "columns": ["<column>"]
+  "outliers": {
+    "salary": {
+      "count":    3,
+      "method":   "iqr",
+      "lower":    42000.0,
+      "upper":    158000.0,
+      "strategy": "winsorise"
+    }
   },
   "custom_transforms": [],
   "_metadata": {
-    "generated_at": "2024-01-15T10:30:00",
-    "dq_score": 72.5,
+    "generated_at": "2026-02-28T12:00:00.000000",
+    "dq_score":     67.4,
     "issues_found": {
-      "missing": 120,
-      "duplicates": 8,
-      "type_mismatches": 14
+      "missing":         42,
+      "duplicates":       5,
+      "type_mismatches":  3,
+      "invalid_values":   8
     }
   }
 }
 ```
 
-`_metadata` is prefixed with `_` to signal that it is informational — the transform step ignores it. `custom_transforms` is always an empty list from the code path; it exists so users can append LLM-generated or hand-written transforms before approval.
+### Field reference
 
----
+**Per-column fields** (`columns.<name>`)
 
-## Schema Type Inference
-
-`_schema_type(detected_type, col_profile)` maps a column's detected type to a schema type string:
-
-| Detected type | Schema type | Notes |
+| Field | Values | Set by |
 |---|---|---|
-| `"bool"` | `"bool"` | Direct pass-through |
-| `"date"` | `"date"` | Direct pass-through |
-| `"numeric"` with float pandas dtype | `"float"` | pandas_dtype checked first — whole-number floats (e.g. salary = 75000.0) must not be called int |
-| `"numeric"` with whole-number min/max | `"int"` | Distinguish int vs float from the stats |
-| `"numeric"` otherwise | `"float"` | Default for numerics |
-| `"string"` with `date_iso` pattern | `"date"` | ISO date strings stored as object columns |
-| `"string"` otherwise | `"string"` | |
+| `type` | `int` `float` `string` `date` `bool` | Code |
+| `nullable` | `true` if column has any nulls or invalid cells | Code |
+| `missing_values` | `null` if no action needed, otherwise `{strategy, value}` | Code (MAR + threshold rules), LLM (MNAR), user |
+| `normalize` | `true` if scaling is suggested | Code |
+| `warning` | Human-readable impact message for `drop_row` / `drop_column` | Code |
+| `note` | Explanation of why this recommendation was made or changed | LLM / user |
 
-The pandas_dtype check takes priority over the min/max heuristic. Without it, a salary column like `[25000.0, 75000.0, 50000.0]` — all whole numbers — would be classified as int, which is semantically wrong.
+**`missing_values.strategy` options**
 
----
-
-## Fill Strategy Rules
-
-`_fill_strategy(detected_type, col_profile)` picks a default imputation strategy. All rules are deterministic — no LLM.
-
-| Condition | Strategy | Rationale |
+| Strategy | Auto-recommended | Effect |
 |---|---|---|
-| `numeric` | `median` | Robust to outliers; mean is sensitive to skew |
-| `bool` | `mode` | Fill with the most common true/false value |
-| `date` | `drop_row` | Dates can't be imputed without domain knowledge |
-| `string` with pattern | `drop_row` | Can't invent a valid email or phone number |
-| `string`, cardinality <10% | `mode` | Low cardinality = likely a category; fill with most common |
-| `string`, cardinality ≥10% | `drop_row` | High cardinality = likely an ID or free text; imputation would fabricate data |
+| `median` | Yes — skewed numeric (outliers present) | Fill nulls with column median |
+| `mean` | Yes — symmetric numeric (no outliers) | Fill nulls with column mean |
+| `mode` | Yes — bool, low-cardinality string | Fill nulls with most frequent value |
+| `fill` | User / LLM only | Fill nulls with a literal `value` |
+| `drop_row` | Yes — ID, pattern, date, high-cardinality string | Drop rows where this column is null or invalid |
+| `drop_column` | Yes — columns ≥50% missing and not MAR | Remove the entire column |
+| `leave_null` | Code (MAR), LLM (MNAR), or user | Keep nulls as-is — no fill, no rows dropped |
 
-The 10% cardinality threshold is a heuristic. A column with 3 unique values in 100 rows (3%) is clearly categorical. A column with 80 unique values in 100 rows (80%) is clearly an identifier or name.
+**`outliers.<col>` fields** *(advisory — not yet applied automatically)*
 
----
-
-## Normalization Advisory
-
-Normalization is suggested for numeric columns where:
-
-```
-abs(max) / abs(min) > 100
-```
-
-This means the values span more than two orders of magnitude (e.g., revenue in dollars alongside a percentage column). Normalization is **advisory** — the recommendations include the column name but the transform step requires explicit user approval before applying min-max or z-score scaling.
-
-The condition requires `min > 0` to avoid division by zero and to exclude columns that cross zero (where ratio-based normalization doesn't make sense).
-
----
-
-## Handling Minority Invalid Values
-
-A column like `["1000", "2000", "3000", "N/A", "5000"]` is classified as `"numeric"` (80% parse successfully). The `"N/A"` value is not a true NaN — `null_count` is 0. But the moment the transform step applies `pd.to_numeric(..., errors="coerce")`, `"N/A"` silently becomes `NaN`.
-
-Without tracking this, the `missing_values` section would be empty (no nulls were detected), leaving that NaN with no fill plan.
-
-**How it works:**
-
-1. **Profile** — after detecting the column type, `profile_dataframe` runs the same coercion as the transform step would (`pd.to_numeric` for numeric, `pd.to_datetime` for date) and counts how many non-null values fail it. This is stored as `invalid_count` in the column profile.
-
-2. **Recommendations** — `build_recommendations` fires a fill strategy entry when `null_count > 0 OR invalid_count > 0`. The same `_fill_strategy` rules apply regardless of which triggered it (median for numeric, mode for bool/low-cardinality string, drop_row for dates/patterns).
-
-3. **Transform** — when casting, the result contains NaNs from both sources (original nulls + coercion failures). The fill strategy handles them all in one pass.
-
-**What we do NOT do:**
-
-- We don't drop the invalid rows at profile time — the user may disagree with the fill strategy and choose `drop_row` themselves.
-- We don't try to repair the invalid values (e.g. strip currency symbols). That's a custom transform, not a system default.
-- We don't raise an error — a column being 10% invalid is a data quality signal, not a pipeline failure.
-
----
-
-## Validity vs Consistency
-
-These two metrics are often confused:
-
-**Validity** — is a cell the right *type* for this column?
-A salary column with a cell containing `"N/A"` fails validity. The value is a string in what should be a numeric column.
-
-**Consistency** — is a cell the right *format* for this column?
-An email column where 90% of values are `user@example.com` and 10% are `user[at]example.com` passes validity (all strings) but fails consistency (format mismatch).
-
-Both are penalised in the DQ score. Consistency has lower weight (15%) because it's often a presentation problem, not a semantic one.
-
----
-
-## Code vs LLM Boundary
-
-Everything in `dq_logic.py` is deterministic and LLM-free. This is a deliberate design choice:
-
-- **Reproducibility**: the same CSV always produces the same profile and the same base recommendations.
-- **Testability**: all logic has unit tests with exact assertions. LLM responses can't be unit tested the same way.
-- **Trust**: users can understand and verify the rules. A "median fill" recommendation is self-explanatory.
-
-The LLM layer (Phase 3, not yet implemented) sits between `build_recommendations` and the user. It will receive the `column_profiles` and may enhance the recommendations with semantic context — for example, recognising that a column named `employee_id` should use `drop_row` even if it has low cardinality. The code-generated recommendations are always the starting point; the LLM can only refine them.
-
----
-
-## What the User Can Edit
-
-The user receives the generated JSON and can change any field before approving it. Common edits:
-
-- Change `"strategy": "drop_row"` to `"strategy": "fill"` with a custom `"value"`
-- Remove a column from `normalization.columns`
-- Add an entry to `custom_transforms` with a natural-language description
-- Override a `schema.type` that was inferred incorrectly
-
-The approved JSON is stored separately (`recommendations_approved`) and is the input to the transform flow. The original generated JSON is preserved for auditing and future ML training (to learn which defaults users change most often).
+| Field | Values |
+|---|---|
+| `count` | Number of outliers detected |
+| `method` | `iqr` (default) or `zscore` |
+| `lower` | Lower IQR bound (Q1 − 1.5×IQR) — used by `winsorise` and `remove` |
+| `upper` | Upper IQR bound (Q3 + 1.5×IQR) — used by `winsorise` and `remove` |
+| `strategy` | `keep` `winsorise` `remove` `cap` |

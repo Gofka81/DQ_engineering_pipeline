@@ -29,15 +29,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from flows.dq_logic import (
     _calculate_consistency,
     _calculate_validity,
+    _detect_numeric_sentinels,
+    _count_sentinels,
     _detect_column_type,
     _fill_strategy,
     _profile_numeric_column,
     _profile_string_column,
     _schema_type,
+    apply_recommendations,
     build_recommendations,
     parse_csv,
     profile_dataframe,
     score_profile,
+    score_profile_detailed,
 )
 
 
@@ -681,8 +685,30 @@ class TestScoreProfile:
 
 class TestFillStrategy:
 
-    def test_numeric_gets_median(self):
-        assert _fill_strategy("numeric", {"pattern": None, "cardinality_pct": 80}) == "median"
+    def test_numeric_symmetric_no_stats_gets_mean(self):
+        # No stats / no outliers → symmetric assumption → mean
+        assert _fill_strategy("numeric", {"pattern": None, "cardinality_pct": 80}) == "mean"
+
+    def test_numeric_with_outliers_gets_median(self):
+        # outlier count > 0 → distribution is heavy-tailed → median
+        assert _fill_strategy("numeric", {
+            "stats": {"mean": 10000, "median": 9000, "std": 5000},
+            "outliers": {"count": 3},
+        }) == "median"
+
+    def test_numeric_skewed_gets_median(self):
+        # |mean - median| / std = |10000 - 7000| / 5000 = 0.6 > 0.15 → skewed → median
+        assert _fill_strategy("numeric", {
+            "stats": {"mean": 10000, "median": 7000, "std": 5000},
+            "outliers": {"count": 0},
+        }) == "median"
+
+    def test_numeric_symmetric_gets_mean(self):
+        # |mean - median| / std = 0 / 5000 = 0 < 0.15, no outliers → mean
+        assert _fill_strategy("numeric", {
+            "stats": {"mean": 10000, "median": 10000, "std": 5000},
+            "outliers": {"count": 0},
+        }) == "mean"
 
     def test_bool_gets_mode(self):
         assert _fill_strategy("bool", {"pattern": None, "cardinality_pct": 50}) == "mode"
@@ -763,62 +789,69 @@ class TestSchemaType:
 class TestBuildRecommendations:
 
     @pytest.fixture
-    def profile_with_issues(self):
+    def df_with_issues(self):
         """
         5 rows: Alice duplicated, salary null for Bob,
         one invalid email (not-email), dept is low-cardinality.
         """
-        return profile_dataframe(pd.DataFrame({
+        return pd.DataFrame({
             "name":       ["Alice", "Bob", "Charlie", "Alice", "Diana"],
             "email":      ["a@b.com", "c@d.com", "e@f.com", "a@b.com", "not-email"],
             "age":        [30, 25, 35, 30, 28],
             "salary":     [75000.0, None, 90000.0, 75000.0, 60000.0],
             "department": ["Eng", "Sales", "Eng", "Eng", "Marketing"],
-        }))
+        })
 
-    # --- Schema ---
+    @pytest.fixture
+    def profile_with_issues(self, df_with_issues):
+        return profile_dataframe(df_with_issues)
 
-    def test_schema_covers_all_columns(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert set(rec["schema"].keys()) == {
+    # --- Columns structure ---
+
+    def test_schema_covers_all_columns(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert set(rec["columns"].keys()) == {
             "name", "email", "age", "salary", "department"
         }
 
-    def test_nullable_true_for_columns_with_nulls(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert rec["schema"]["salary"]["nullable"] is True
+    def test_nullable_true_for_columns_with_nulls(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["salary"]["nullable"] is True
 
-    def test_nullable_false_for_complete_columns(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert rec["schema"]["age"]["nullable"] is False
-        assert rec["schema"]["name"]["nullable"] is False
+    def test_nullable_false_for_complete_columns(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["age"]["nullable"] is False
+        assert rec["columns"]["name"]["nullable"] is False
 
-    def test_age_schema_type_is_int(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert rec["schema"]["age"]["type"] == "int"
+    def test_age_schema_type_is_int(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["age"]["type"] == "int"
 
-    def test_salary_schema_type_is_float(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert rec["schema"]["salary"]["type"] == "float"
+    def test_salary_schema_type_is_float(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["salary"]["type"] == "float"
 
     # --- Missing values ---
 
-    def test_missing_values_only_for_null_columns(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert "salary" in rec["missing_values"]
-        assert "age" not in rec["missing_values"]
-        assert "name" not in rec["missing_values"]
+    def test_missing_values_only_for_null_columns(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["salary"]["missing_values"] is not None
+        assert rec["columns"]["age"]["missing_values"] is None
+        assert rec["columns"]["name"]["missing_values"] is None
 
-    def test_salary_numeric_gets_median(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert rec["missing_values"]["salary"]["strategy"] == "median"
+    def test_salary_numeric_gets_mean(self, df_with_issues, profile_with_issues):
+        # 4 non-null values: 75000, 90000, 75000, 60000 — symmetric (mean≈median), no outliers
+        # (fewer than 30 non-null values → IQR outlier check skipped → has_outliers=False)
+        # Result: mean, not median.
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["salary"]["missing_values"]["strategy"] == "mean"
 
     def test_email_with_nulls_gets_drop_row(self):
         df = pd.DataFrame({
             "email": ["a@b.com", "b@c.com", "c@d.com", None, "e@f.com"],
         })
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert rec["missing_values"]["email"]["strategy"] == "drop_row"
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["email"]["missing_values"]["strategy"] == "drop_row"
 
     def test_department_low_cardinality_with_nulls_gets_mode(self):
         # department: 3 unique out of 6 non-null = 50% cardinality — wait,
@@ -826,116 +859,143 @@ class TestBuildRecommendations:
         df = pd.DataFrame({
             "dept": ["Eng", "Eng", "Eng", "Eng", "Eng", None, "Sales", "Eng", "Eng", "Eng"],
         })
-        rec = build_recommendations(profile_dataframe(df), 90.0)
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
         # cardinality = 2 unique / 9 non-null = 22% → still above 10% → drop_row
         # For true mode, cardinality must be < 10%
         # Let's just verify a value is returned
-        assert rec["missing_values"]["dept"]["strategy"] in ("mode", "drop_row")
+        assert rec["columns"]["dept"]["missing_values"]["strategy"] in ("mode", "drop_row")
 
     def test_truly_low_cardinality_string_with_nulls_gets_mode(self):
         # 1 unique value out of 20 non-null = 5% cardinality → mode
         vals = ["Eng"] * 20 + [None]
         df = pd.DataFrame({"dept": vals})
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert rec["missing_values"]["dept"]["strategy"] == "mode"
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["dept"]["missing_values"]["strategy"] == "mode"
 
     def test_bool_with_nulls_gets_mode(self):
         df = pd.DataFrame({"active": [True, False, True, None, True]})
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert rec["missing_values"]["active"]["strategy"] == "mode"
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["active"]["missing_values"]["strategy"] == "mode"
 
     def test_date_with_nulls_gets_drop_row(self):
         dates = pd.to_datetime(["2021-01-01", "2022-06-15", None, "2023-03-20"])
         df = pd.DataFrame({"joined": dates})
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert rec["missing_values"]["joined"]["strategy"] == "drop_row"
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["joined"]["missing_values"]["strategy"] == "drop_row"
 
     # --- Duplicates ---
 
-    def test_duplicates_recommended_when_present(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
+    def test_duplicates_recommended_when_present(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
         assert rec["duplicates"]["strategy"] == "drop"
         assert rec["duplicates"]["keep"] == "first"
 
     def test_no_duplicates_entry_when_all_unique(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5], "val": [10, 20, 30, 40, 50]})
-        rec = build_recommendations(profile_dataframe(df), 100.0)
+        rec = build_recommendations(df, profile_dataframe(df), 100.0)
         assert rec["duplicates"] == {}
 
     # --- Normalization ---
 
     def test_normalization_suggested_for_large_value_range(self):
-        # min=100, max=100000 → ratio 1000 → suggest normalization
+        # range = 99900, max_abs = 100000 > 100 → suggest normalization
         df = pd.DataFrame({"salary": [100.0, 500.0, 1000.0, 50000.0, 100000.0]})
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert "salary" in rec["normalization"]["columns"]
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["salary"]["normalize"] == "min_max"
 
     def test_normalization_not_suggested_for_small_range(self):
+        # range = 10, max_abs = 35 < 100 → no normalization
         df = pd.DataFrame({"age": [25, 28, 30, 32, 35]})
-        rec = build_recommendations(profile_dataframe(df), 100.0)
-        assert "age" not in rec["normalization"]["columns"]
+        rec = build_recommendations(df, profile_dataframe(df), 100.0)
+        assert rec["columns"]["age"]["normalize"] is False
 
-    def test_normalization_not_suggested_for_string_columns(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        assert "name" not in rec["normalization"]["columns"]
-        assert "email" not in rec["normalization"]["columns"]
+    def test_normalization_not_suggested_for_string_columns(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        assert rec["columns"]["name"]["normalize"] is False
+        assert rec["columns"]["email"]["normalize"] is False
+
+    def test_normalization_z_score_when_outliers_present(self):
+        # ≥30 values required for IQR outlier detection; include an extreme outlier
+        normal = list(range(1000, 1031))   # 31 values in a tight cluster
+        normal[-1] = 999999                # extreme outlier → IQR will flag it
+        df = pd.DataFrame({"revenue": normal})
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["revenue"]["normalize"] == "z_score"
+
+    def test_normalization_min_max_when_no_outliers(self):
+        # Large range but no outliers → min_max
+        df = pd.DataFrame({"salary": [100.0, 500.0, 1000.0, 50000.0, 100000.0]})
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["salary"]["normalize"] == "min_max"
 
     # --- Metadata ---
 
-    def test_metadata_contains_dq_score(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 87.5)
+    def test_metadata_contains_dq_score(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 87.5)
         assert rec["_metadata"]["dq_score"] == 87.5
 
-    def test_metadata_issues_found(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
+    def test_metadata_issues_found(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
         assert rec["_metadata"]["issues_found"]["missing"] == 1
         assert rec["_metadata"]["issues_found"]["duplicates"] == 1
 
-    def test_metadata_generated_at_is_iso_string(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
+    def test_metadata_generated_at_is_iso_string(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
         from datetime import datetime
         # Should not raise
         datetime.fromisoformat(rec["_metadata"]["generated_at"])
 
     # --- Structure ---
 
-    def test_all_top_level_keys_present(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
-        for key in ("schema", "missing_values", "duplicates",
-                    "normalization", "custom_transforms", "_metadata"):
+    def test_all_top_level_keys_present(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
+        for key in ("columns", "duplicates", "custom_transforms", "outliers", "_metadata"):
             assert key in rec
 
-    def test_custom_transforms_is_empty_list(self, profile_with_issues):
-        rec = build_recommendations(profile_with_issues, 85.0)
+    def test_custom_transforms_is_empty_list(self, df_with_issues, profile_with_issues):
+        rec = build_recommendations(df_with_issues, profile_with_issues, 85.0)
         assert rec["custom_transforms"] == []
 
     # --- Invalid cells (non-null values that fail type cast) ---
 
     def test_column_with_invalid_cells_but_no_nulls_gets_fill_strategy(self):
-        # "N/A" is not NaN — null_count=0 — but becomes NaN after numeric cast
+        # "N/A" is not NaN — null_count=0 — but becomes NaN after numeric cast.
+        # 4 valid values: 1000-4000, symmetric, <30 values → no IQR check → "mean"
         df = pd.DataFrame({"salary": ["1000", "2000", "3000", "4000", "N/A"]})
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert "salary" in rec["missing_values"]
-        assert rec["missing_values"]["salary"]["strategy"] == "median"
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["salary"]["missing_values"] is not None
+        assert rec["columns"]["salary"]["missing_values"]["strategy"] == "mean"
 
     def test_nullable_true_for_column_with_invalid_cells_no_nulls(self):
         df = pd.DataFrame({"salary": ["1000", "2000", "3000", "4000", "N/A"]})
-        rec = build_recommendations(profile_dataframe(df), 90.0)
-        assert rec["schema"]["salary"]["nullable"] is True
+        rec = build_recommendations(df, profile_dataframe(df), 90.0)
+        assert rec["columns"]["salary"]["nullable"] is True
 
     def test_clean_column_no_nulls_no_invalids_not_in_missing_values(self):
         df = pd.DataFrame({"salary": ["1000", "2000", "3000", "4000", "5000"]})
-        rec = build_recommendations(profile_dataframe(df), 100.0)
-        assert "salary" not in rec["missing_values"]
-        assert rec["schema"]["salary"]["nullable"] is False
+        rec = build_recommendations(df, profile_dataframe(df), 100.0)
+        assert rec["columns"]["salary"]["missing_values"] is None
+        assert rec["columns"]["salary"]["nullable"] is False
 
     def test_column_with_both_nulls_and_invalids_gets_one_fill_entry(self):
         # Some true NaNs + some "N/A" strings
         df = pd.DataFrame({"salary": ["1000", "2000", None, "4000", "N/A"]})
-        rec = build_recommendations(profile_dataframe(df), 85.0)
+        rec = build_recommendations(df, profile_dataframe(df), 85.0)
         # Should appear exactly once (not duplicated)
-        assert "salary" in rec["missing_values"]
-        assert isinstance(rec["missing_values"]["salary"], dict)
+        assert rec["columns"]["salary"]["missing_values"] is not None
+        assert isinstance(rec["columns"]["salary"]["missing_values"], dict)
+
+    def test_mar_column_gets_leave_null(self):
+        # merchant_nm is null exactly when txn_typ=="ATM" — statistically MAR.
+        # Need enough rows (≥10) and enough nulls (≥5) for scipy to detect it.
+        n = 30
+        df = pd.DataFrame({
+            "txn_typ":     ["ATM"] * 15 + ["POS"] * 15,
+            "merchant_nm": [None]  * 15 + ["Shop A"] * 15,
+            "amount":      [100.0] * n,
+        })
+        rec = build_recommendations(df, profile_dataframe(df), 80.0)
+        assert rec["columns"]["merchant_nm"]["missing_values"]["strategy"] == "leave_null"
 
 
 # ===========================================================================
@@ -997,3 +1057,740 @@ class TestParseCsv:
         content = "a,b,c\n1,2,3\n4,5,6\n7,8,9\n"
         _, malformed = parse_csv(csv_bytes(content))
         assert malformed == 0
+
+
+# ===========================================================================
+# score_profile_detailed
+# ===========================================================================
+
+class TestScoreProfileDetailed:
+
+    def _make_profile(self, completeness, uniqueness, validity, consistency):
+        return {
+            "completeness": completeness,
+            "uniqueness":   uniqueness,
+            "validity":     validity,
+            "consistency":  consistency,
+        }
+
+    def test_returns_five_keys(self):
+        profile = self._make_profile(100, 100, 100, 100)
+        result = score_profile_detailed(profile)
+        assert set(result.keys()) == {"overall", "completeness", "uniqueness", "validity", "consistency"}
+
+    def test_overall_matches_score_profile(self):
+        profile = self._make_profile(95.2, 100.0, 98.1, 99.0)
+        result = score_profile_detailed(profile)
+        assert result["overall"] == score_profile(profile)
+
+    def test_overall_formula_is_correct(self):
+        profile = self._make_profile(95.2, 100.0, 98.1, 99.0)
+        result = score_profile_detailed(profile)
+        expected = round(95.2 * 0.35 + 100.0 * 0.25 + 98.1 * 0.25 + 99.0 * 0.15, 2)
+        assert result["overall"] == expected
+
+    def test_perfect_score_all_100(self):
+        profile = self._make_profile(100.0, 100.0, 100.0, 100.0)
+        result = score_profile_detailed(profile)
+        assert result["overall"] == 100.0
+        assert result["completeness"] == 100.0
+
+    def test_component_values_are_rounded(self):
+        profile = self._make_profile(95.2222, 100.0, 98.1111, 99.0)
+        result = score_profile_detailed(profile)
+        assert result["completeness"] == round(95.2222, 2)
+        assert result["validity"] == round(98.1111, 2)
+
+    def test_dimension_values_match_profile(self):
+        profile = self._make_profile(80.0, 90.0, 70.0, 60.0)
+        result = score_profile_detailed(profile)
+        assert result["completeness"] == 80.0
+        assert result["uniqueness"] == 90.0
+        assert result["validity"] == 70.0
+        assert result["consistency"] == 60.0
+
+
+# ===========================================================================
+# apply_recommendations
+# ===========================================================================
+
+class TestApplyRecommendations:
+
+    def _df(self, data):
+        return pd.DataFrame(data)
+
+    def _col(self, type="string", nullable=False, missing_values=None, normalize=False):
+        """Helper to build a column config dict."""
+        return {"type": type, "nullable": nullable, "missing_values": missing_values,
+                "normalize": normalize, "warnings": [], "note": None}
+
+    def _mv(self, strategy, value=None):
+        """Helper to build a missing_values dict."""
+        return {"strategy": strategy, "value": value}
+
+    # --- Schema cast ---
+
+    def test_numeric_string_cast_to_float(self):
+        # 1 bad value out of 21 = ~4.8% — below 5% guard threshold, cast proceeds
+        data = ["50000"] * 10 + ["60000"] * 10 + ["N/A"]
+        df = self._df({"salary": data})
+        recs = {"columns": {"salary": self._col(type="float")}, "duplicates": {}, "custom_transforms": []}
+        result = apply_recommendations(df, recs)
+        assert pd.isna(result["salary"].iloc[20])  # "N/A" → NaN via errors="coerce"
+        assert result["salary"].iloc[0] == 50000.0
+
+    def test_unsafe_cast_is_blocked(self):
+        # 1 out of 3 = 33% would become NaN — guard blocks the cast, column stays as-is
+        df = self._df({"salary": ["50000", "60000", "N/A"]})
+        recs = {"columns": {"salary": self._col(type="float")}, "duplicates": {}, "custom_transforms": []}
+        result = apply_recommendations(df, recs)
+        assert result["salary"].iloc[2] == "N/A"  # cast was blocked — not converted
+        assert result["salary"].dtype == object
+
+    def test_int_cast_after_fill(self):
+        df = self._df({"age": [25.0, None, 30.0]})
+        recs = {
+            "columns": {"age": self._col(type="int", nullable=True, missing_values=self._mv("median"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["age"].dtype in (int, "int64", "int32")
+
+    def test_bool_cast(self):
+        df = self._df({"active": ["True", "False", "True"]})
+        recs = {"columns": {"active": self._col(type="bool")}, "duplicates": {}, "custom_transforms": []}
+        result = apply_recommendations(df, recs)
+        assert result["active"].tolist() == [True, False, True]
+
+    def test_unknown_column_in_schema_skipped(self):
+        df = self._df({"name": ["Alice", "Bob"]})
+        recs = {"columns": {"nonexistent": self._col(type="int")}, "duplicates": {}, "custom_transforms": []}
+        result = apply_recommendations(df, recs)
+        assert list(result.columns) == ["name"]
+
+    # --- Missing values ---
+
+    def test_fill_median(self):
+        df = self._df({"salary": [50000.0, None, 70000.0]})
+        recs = {
+            "columns": {"salary": self._col(type="float", nullable=True, missing_values=self._mv("median"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["salary"].isna().sum() == 0
+        assert result["salary"].iloc[1] == 60000.0
+
+    def test_fill_mean(self):
+        df = self._df({"val": [10.0, None, 30.0]})
+        recs = {
+            "columns": {"val": self._col(nullable=True, missing_values=self._mv("mean"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["val"].iloc[1] == 20.0
+
+    def test_fill_mode_string(self):
+        df = self._df({"dept": ["HR", "HR", None, "Finance"]})
+        recs = {
+            "columns": {"dept": self._col(nullable=True, missing_values=self._mv("mode"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["dept"].iloc[2] == "HR"
+
+    def test_fill_literal_value(self):
+        df = self._df({"status": [None, "active"]})
+        recs = {
+            "columns": {"status": self._col(nullable=True, missing_values=self._mv("fill", "unknown"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["status"].iloc[0] == "unknown"
+
+    def test_drop_row_removes_null_rows(self):
+        df = self._df({"email": ["a@b.com", None, "c@d.com"]})
+        recs = {
+            "columns": {"email": self._col(nullable=True, missing_values=self._mv("drop_row"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert len(result) == 2
+        assert result["email"].isna().sum() == 0
+
+    def test_multiple_drop_row_columns_batched(self):
+        df = self._df({"a": [1, None, 3], "b": ["x", "y", None]})
+        recs = {
+            "columns": {
+                "a": self._col(nullable=True, missing_values=self._mv("drop_row")),
+                "b": self._col(nullable=True, missing_values=self._mv("drop_row")),
+            },
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert len(result) == 1  # only row 0 (index 0) has no NaN
+
+    # --- Duplicates ---
+
+    def test_drop_duplicates(self):
+        df = self._df({"id": [1, 2, 1], "name": ["Alice", "Bob", "Alice"]})
+        recs = {
+            "columns": {},
+            "duplicates": {"strategy": "drop", "subset": [], "keep": "first"},
+            "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert len(result) == 2
+
+    def test_no_duplicates_entry_leaves_rows_unchanged(self):
+        df = self._df({"id": [1, 2, 1]})
+        recs = {"columns": {}, "duplicates": {}, "custom_transforms": []}
+        result = apply_recommendations(df, recs)
+        assert len(result) == 3
+
+    # --- Normalization ---
+
+    def test_normalization_scales_to_0_1(self):
+        df = self._df({"salary": [0.0, 50000.0, 100000.0]})
+        recs = {
+            "columns": {"salary": self._col(type="float", normalize="min_max")},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["salary"].min() == 0.0
+        assert result["salary"].max() == 1.0
+        assert result["salary"].iloc[1] == 0.5
+
+    def test_normalization_constant_column_not_divided_by_zero(self):
+        df = self._df({"val": [5.0, 5.0, 5.0]})
+        recs = {
+            "columns": {"val": self._col(type="float", normalize="min_max")},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)  # should not raise
+        assert list(result["val"]) == [5.0, 5.0, 5.0]
+
+    def test_z_score_normalization_produces_zero_mean(self):
+        df = self._df({"score": [10.0, 20.0, 30.0, 40.0, 50.0]})
+        recs = {
+            "columns": {"score": self._col(type="float", normalize="z_score")},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert abs(result["score"].mean()) < 1e-10
+
+    def test_z_score_normalization_produces_unit_std(self):
+        # ddof=0 → population std → std of result should be 1.0
+        df = self._df({"score": [10.0, 20.0, 30.0, 40.0, 50.0]})
+        recs = {
+            "columns": {"score": self._col(type="float", normalize="z_score")},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert abs(result["score"].std(ddof=0) - 1.0) < 1e-10
+
+    def test_z_score_constant_column_not_divided_by_zero(self):
+        df = self._df({"val": [7.0, 7.0, 7.0]})
+        recs = {
+            "columns": {"val": self._col(type="float", normalize="z_score")},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)  # should not raise
+        assert list(result["val"]) == [7.0, 7.0, 7.0]
+
+    def test_normalize_false_leaves_column_unchanged(self):
+        df = self._df({"salary": [50000.0, 100000.0, 150000.0]})
+        recs = {
+            "columns": {"salary": self._col(type="float", normalize=False)},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert list(result["salary"]) == [50000.0, 100000.0, 150000.0]
+
+    # --- Input safety ---
+
+    def test_input_dataframe_not_mutated(self):
+        df = self._df({"salary": [50000.0, None, 70000.0]})
+        original = df.copy()
+        recs = {
+            "columns": {"salary": self._col(nullable=True, missing_values=self._mv("median"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        apply_recommendations(df, recs)
+        pd.testing.assert_frame_equal(df, original)
+
+    # --- drop_column strategy ---
+
+    def test_drop_column_removes_column(self):
+        df = self._df({"name": ["Alice", "Bob", None], "score": [1, 2, 3]})
+        recs = {
+            "columns": {"name": self._col(nullable=True, missing_values=self._mv("drop_column"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert "name" not in result.columns
+        assert "score" in result.columns
+        assert len(result) == 3  # no rows dropped
+
+    def test_drop_column_missing_column_is_safe(self):
+        df = self._df({"score": [1, 2, 3]})
+        recs = {
+            "columns": {"nonexistent": self._col(nullable=True, missing_values=self._mv("drop_column"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)  # must not raise
+        assert list(result.columns) == ["score"]
+
+    def test_drop_column_does_not_affect_drop_row_for_other_cols(self):
+        df = self._df({"bad": [None, None, "x"], "keep": [1, None, 3]})
+        recs = {
+            "columns": {
+                "bad":  self._col(nullable=True, missing_values=self._mv("drop_column")),
+                "keep": self._col(nullable=True, missing_values=self._mv("drop_row")),
+            },
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert "bad" not in result.columns
+        assert len(result) == 2  # 1 row dropped because keep has a null
+
+    # --- leave_null strategy ---
+
+    def test_leave_null_keeps_nulls_intact(self):
+        df = self._df({"notes": ["a", None, "c"]})
+        recs = {
+            "columns": {"notes": self._col(nullable=True, missing_values=self._mv("leave_null"))},
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["notes"].isna().sum() == 1
+        assert len(result) == 3  # no rows dropped
+
+    def test_leave_null_does_not_drop_rows(self):
+        df = self._df({"a": [1, None, 3], "b": [None, 2, None]})
+        recs = {
+            "columns": {
+                "a": self._col(nullable=True, missing_values=self._mv("leave_null")),
+                "b": self._col(nullable=True, missing_values=self._mv("leave_null")),
+            },
+            "duplicates": {}, "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert len(result) == 3
+
+    # --- Outlier treatment ---
+
+    def test_outlier_winsorise_clips_values(self):
+        df = self._df({"salary": [10, 20, 30, 40, 9999]})
+        recs = {
+            "columns": {"salary": self._col()},
+            "duplicates": {}, "custom_transforms": [],
+            "outliers": {"salary": {"strategy": "winsorise", "method": "iqr", "lower": 5.0, "upper": 50.0}},
+        }
+        result = apply_recommendations(df, recs)
+        assert result["salary"].max() == 50.0
+        assert result["salary"].min() == 10.0
+
+    def test_outlier_remove_drops_rows(self):
+        df = self._df({"salary": [10, 20, 30, 40, 9999]})
+        recs = {
+            "columns": {"salary": self._col()},
+            "duplicates": {}, "custom_transforms": [],
+            "outliers": {"salary": {"strategy": "remove", "method": "iqr", "lower": 5.0, "upper": 50.0}},
+        }
+        result = apply_recommendations(df, recs)
+        assert len(result) == 4
+        assert 9999 not in result["salary"].values
+
+    def test_outlier_keep_leaves_values_unchanged(self):
+        df = self._df({"salary": [10, 20, 30, 40, 9999]})
+        recs = {
+            "columns": {"salary": self._col()},
+            "duplicates": {}, "custom_transforms": [],
+            "outliers": {"salary": {"strategy": "keep", "method": "iqr", "lower": 5.0, "upper": 50.0}},
+        }
+        result = apply_recommendations(df, recs)
+        assert 9999 in result["salary"].values
+
+
+# ===========================================================================
+# _fill_strategy — drop_column threshold
+# ===========================================================================
+
+class TestFillStrategyDropColumn:
+
+    def test_null_pct_exactly_50_gets_drop_column(self):
+        assert _fill_strategy("numeric", {"null_pct": 50, "cardinality_pct": 80}) == "drop_column"
+
+    def test_null_pct_above_50_gets_drop_column(self):
+        assert _fill_strategy("string", {"null_pct": 75, "pattern": None, "cardinality_pct": 5}) == "drop_column"
+
+    def test_null_pct_below_50_falls_through_to_normal_rules(self):
+        # No stats → no outliers, no skew → "mean" (symmetric assumption)
+        assert _fill_strategy("numeric", {"null_pct": 49, "cardinality_pct": 80}) == "mean"
+
+    def test_null_pct_zero_falls_through_to_normal_rules(self):
+        assert _fill_strategy("string", {"null_pct": 0, "pattern": None, "cardinality_pct": 5}) == "mode"
+
+    def test_drop_column_takes_priority_over_type_rules(self):
+        # Even for a bool column: if >=50% null → drop_column, not mode
+        assert _fill_strategy("bool", {"null_pct": 60, "cardinality_pct": 50}) == "drop_column"
+
+
+# ===========================================================================
+# build_recommendations — _metadata.warnings
+# ===========================================================================
+
+class TestBuildRecommendationsWarnings:
+
+    def _profile_with_cols(self, col_profiles, total_rows=10):
+        """Build a minimal profile dict for build_recommendations."""
+        return {
+            "total_rows":     total_rows,
+            "total_columns":  len(col_profiles),
+            "total_cells":    total_rows * len(col_profiles),
+            "missing_cells":  sum(cp.get("null_count", 0) for cp in col_profiles.values()),
+            "duplicate_rows": 0,
+            "malformed_rows": 0,
+            "invalid_cells":  sum(cp.get("invalid_count", 0) for cp in col_profiles.values()),
+            "completeness":   100.0,
+            "uniqueness":     100.0,
+            "validity":       100.0,
+            "consistency":    100.0,
+            "column_profiles": col_profiles,
+        }
+
+    def test_drop_row_column_produces_warning(self):
+        col_profiles = {
+            "email": {
+                "detected_type": "string", "null_count": 2, "null_pct": 20.0,
+                "invalid_count": 0, "pattern": "email", "cardinality_pct": 100.0,
+                "pandas_dtype": "object",
+            }
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=10)
+        recs = build_recommendations(pd.DataFrame(), profile, 85.0)
+        warnings = recs["columns"]["email"]["warnings"]
+        assert len(warnings) > 0
+        assert any("drop_row" in w for w in warnings)
+        assert any("2" in w for w in warnings)  # null_count in message
+
+    def test_drop_column_column_produces_warning(self):
+        col_profiles = {
+            "sparse": {
+                "detected_type": "string", "null_count": 6, "null_pct": 60.0,
+                "invalid_count": 0, "pattern": None, "cardinality_pct": 5.0,
+                "pandas_dtype": "object",
+            }
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=10)
+        recs = build_recommendations(pd.DataFrame(), profile, 70.0)
+        warnings = recs["columns"]["sparse"]["warnings"]
+        assert len(warnings) > 0
+        assert any("drop_column" in w for w in warnings)
+        assert any("60.0" in w for w in warnings)  # null_pct in message
+
+    def test_mean_column_produces_no_warning(self):
+        # Numeric column with null < 50% and no drop strategy → no warnings
+        col_profiles = {
+            "salary": {
+                "detected_type": "numeric", "null_count": 1, "null_pct": 10.0,
+                "invalid_count": 0, "stats": {"min": 1000, "max": 9000},
+                "pandas_dtype": "float64",
+            }
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=10)
+        recs = build_recommendations(pd.DataFrame(), profile, 90.0)
+        assert recs["columns"]["salary"]["warnings"] == []
+
+    def test_warnings_empty_for_clean_dataset(self):
+        # A clean dataset (no missing values) should have warnings=[] on all columns
+        col_profiles = {
+            "id": {
+                "detected_type": "numeric", "null_count": 0, "null_pct": 0.0,
+                "invalid_count": 0, "stats": {"min": 1, "max": 5},
+                "pandas_dtype": "int64",
+            }
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=5)
+        recs = build_recommendations(pd.DataFrame(), profile, 100.0)
+        for col_def in recs["columns"].values():
+            assert col_def["warnings"] == []
+
+    def test_sentinel_warning_generated_for_non_drop_strategy(self):
+        # String column with sentinel values and mode strategy → sentinel warning
+        col_profiles = {
+            "status": {
+                "detected_type": "string", "null_count": 0, "null_pct": 0.0,
+                "invalid_count": 0, "pattern": None, "cardinality_pct": 5.0,
+                "pandas_dtype": "object", "sentinel_count": 3,
+            }
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=10)
+        recs = build_recommendations(pd.DataFrame(), profile, 90.0)
+        warnings = recs["columns"]["status"]["warnings"]
+        assert len(warnings) > 0
+        assert any("sentinel" in w.lower() for w in warnings)
+        assert any("3" in w for w in warnings)
+
+    def test_sentinel_warning_also_raised_alongside_drop_strategy(self):
+        # High-null column gets drop_column strategy AND has sentinels → both warnings present
+        col_profiles = {
+            "notes": {
+                "detected_type": "string", "null_count": 6, "null_pct": 60.0,
+                "invalid_count": 0, "pattern": None, "cardinality_pct": 5.0,
+                "pandas_dtype": "object", "sentinel_count": 2,
+            }
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=10)
+        recs = build_recommendations(pd.DataFrame(), profile, 70.0)
+        warnings = recs["columns"]["notes"]["warnings"]
+        assert any("drop_column" in w for w in warnings)
+        assert any("sentinel" in w.lower() for w in warnings)
+
+    def test_sentinel_values_in_metadata_issues_found(self):
+        # sentinel_count in column profiles → _metadata.issues_found.sentinel_values
+        col_profiles = {
+            "col_a": {
+                "detected_type": "string", "null_count": 0, "null_pct": 0.0,
+                "invalid_count": 0, "pattern": None, "cardinality_pct": 50.0,
+                "pandas_dtype": "object", "sentinel_count": 4,
+            },
+            "col_b": {
+                "detected_type": "string", "null_count": 0, "null_pct": 0.0,
+                "invalid_count": 0, "pattern": None, "cardinality_pct": 50.0,
+                "pandas_dtype": "object", "sentinel_count": 2,
+            },
+        }
+        profile = self._profile_with_cols(col_profiles, total_rows=10)
+        recs = build_recommendations(pd.DataFrame(), profile, 90.0)
+        assert recs["_metadata"]["issues_found"]["sentinel_values"] == 6
+
+
+# ===========================================================================
+# _count_sentinels
+# ===========================================================================
+
+class TestCountSentinels:
+
+    def test_na_string_detected(self):
+        s = series(["Alice", "N/A", "Bob", "unknown", "Carol"])
+        assert _count_sentinels(s) == 2
+
+    def test_case_insensitive(self):
+        s = series(["NULL", "None", "UNKNOWN", "Missing", "valid"])
+        assert _count_sentinels(s) == 4
+
+    def test_dash_and_question_mark(self):
+        s = series(["-", "?", "real_value"])
+        assert _count_sentinels(s) == 2
+
+    def test_clean_data_returns_zero(self):
+        s = series(["Alice", "Bob", "Charlie"])
+        assert _count_sentinels(s) == 0
+
+    def test_empty_series_returns_zero(self):
+        s = series([])
+        assert _count_sentinels(s) == 0
+
+    def test_all_null_returns_zero(self):
+        s = series([None, None, None])
+        assert _count_sentinels(s) == 0
+
+    def test_whitespace_stripped(self):
+        # "  N/A  " should still be detected after strip
+        s = series(["  N/A  ", "  unknown  ", "real"])
+        assert _count_sentinels(s) == 2
+
+    def test_profile_string_column_includes_sentinel_count(self):
+        s = series(["Alice", "N/A", "Bob", "unknown"])
+        profile = _profile_string_column(s)
+        assert "sentinel_count" in profile
+        assert profile["sentinel_count"] == 2
+
+
+# ===========================================================================
+# _detect_numeric_sentinels
+# ===========================================================================
+
+class TestDetectNumericSentinels:
+
+    def test_minus_999_detected(self):
+        # -999 appears 5 times in 50 values (10%) — meets absolute count >= 5 and
+        # is few enough not to distort Q1/Q3, so falls outside the 3×IQR fence
+        normal = list(range(1, 46))  # 45 normal values
+        with_sentinel = normal + [-999, -999, -999, -999, -999]
+        s = series(with_sentinel)
+        count, values = _detect_numeric_sentinels(s)
+        assert count == 5
+        assert -999.0 in values
+
+    def test_9999_detected(self):
+        # 9999 appears 5 times in 50 values — extreme upper sentinel
+        normal = list(range(1, 46))  # 45 normal values
+        with_sentinel = normal + [9999, 9999, 9999, 9999, 9999]
+        s = series(with_sentinel)
+        count, values = _detect_numeric_sentinels(s)
+        assert count == 5
+        assert 9999.0 in values
+
+    def test_returns_unique_values_not_instance_count(self):
+        # -999 appears 5 times but the unique sentinel list has exactly 1 entry
+        normal = list(range(1, 46))  # 45 normal values
+        with_sentinel = normal + [-999, -999, -999, -999, -999]
+        s = series(with_sentinel)
+        _, values = _detect_numeric_sentinels(s)
+        assert len(values) == 1
+        assert values == [-999.0]
+
+    def test_genuine_outlier_single_occurrence_not_flagged(self):
+        # Tight cluster + one outlier. IQR=0 for 19 identical values → returns empty.
+        normal = [50] * 19 + [200]
+        s = series(normal)
+        count, values = _detect_numeric_sentinels(s)
+        assert count == 0
+        assert values == []
+
+    def test_fewer_than_10_values_returns_empty(self):
+        s = series([-999, -999, 1, 2, 3])
+        count, values = _detect_numeric_sentinels(s)
+        assert count == 0
+        assert values == []
+
+    def test_constant_column_returns_empty(self):
+        s = series([5] * 20)
+        count, values = _detect_numeric_sentinels(s)
+        assert count == 0
+        assert values == []
+
+    def test_clean_numeric_data_returns_empty(self):
+        s = series(list(range(1, 31)))  # 1-30, no sentinels
+        count, values = _detect_numeric_sentinels(s)
+        assert count == 0
+        assert values == []
+
+    def test_profile_numeric_column_includes_sentinel_count_and_values(self):
+        # 45 normal + 5 sentinel = 50 total; sentinels are 10% so Q1/Q3 not distorted
+        normal = list(range(1, 46))  # 45 normal values
+        with_sentinel = normal + [-999, -999, -999, -999, -999]  # 5 sentinels
+        s = series(with_sentinel, dtype=float)
+        p = _profile_numeric_column(s)
+        assert p["sentinel_count"] == 5
+        assert p["sentinel_values"] == [-999.0]
+
+    def test_profile_numeric_column_clean_has_empty_sentinel_values(self):
+        s = series(list(range(1, 31)), dtype=float)
+        p = _profile_numeric_column(s)
+        assert p["sentinel_count"] == 0
+        assert p["sentinel_values"] == []
+
+
+# ===========================================================================
+# sentinel_values in build_recommendations and apply_recommendations
+# ===========================================================================
+
+class TestSentinelValuesEndToEnd:
+
+    def _profile_with_sentinel(self, sentinel_val=-999.0, n_normal=45, n_sentinel=5):
+        """Build a DataFrame and profile where a numeric column has sentinel values.
+
+        Uses 45 normal + 5 sentinel = 50 total so sentinels are ~10% of the data,
+        which keeps them from distorting Q1/Q3 and allows the 3×IQR fence to detect them.
+        """
+        normal = list(range(1, n_normal + 1))
+        data = normal + [sentinel_val] * n_sentinel
+        df = pd.DataFrame({"temp": data})
+        return df, profile_dataframe(df)
+
+    def test_build_recommendations_includes_sentinel_values(self):
+        df, profile = self._profile_with_sentinel()
+        recs = build_recommendations(df, profile, 90.0)
+        assert recs["columns"]["temp"]["sentinel_values"] == [-999.0]
+
+    def test_build_recommendations_sentinel_only_column_gets_fill_strategy(self):
+        # Column with sentinels but zero real NaN — needs_fill must still be True
+        # so a fill strategy is generated for the NaN created by step 0.
+        df = pd.DataFrame({"temp": list(range(1, 46)) + [-999.0] * 5})
+        profile = profile_dataframe(df)
+        recs = build_recommendations(df, profile, 90.0)
+        col = recs["columns"]["temp"]
+        assert col["missing_values"] is not None
+        assert col["missing_values"]["strategy"] in ("median", "mean")
+
+    def test_build_recommendations_no_sentinels_has_null_sentinel_values(self):
+        df = pd.DataFrame({"temp": [1.0, 2.0, 3.0, None, 5.0]})
+        profile = profile_dataframe(df)
+        recs = build_recommendations(df, profile, 90.0)
+        assert recs["columns"]["temp"]["sentinel_values"] is None
+
+    def test_apply_replaces_sentinel_before_fill(self):
+        # Column: real values 20-30, sentinel -999.0 (3 instances), no real NaN.
+        # After step 0: -999.0 → NaN. After step 2: filled with median (~25).
+        # Final column must have no -999.0 and no NaN.
+        normal = list(range(20, 38))  # 17 values in 20-37
+        data = normal + [-999.0, -999.0, -999.0]
+        df = pd.DataFrame({"temp": data})
+        recs = {
+            "columns": {
+                "temp": {
+                    "type": "float",
+                    "nullable": True,
+                    "missing_values": {"strategy": "median", "value": None},
+                    "normalize": False,
+                    "warnings": [],
+                    "note": None,
+                    "sentinel_values": [-999.0],
+                }
+            },
+            "duplicates": {},
+            "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert -999.0 not in result["temp"].values
+        assert result["temp"].isna().sum() == 0
+        # All filled values should be close to the median of the normal range
+        assert result["temp"].min() >= 20.0
+
+    def test_apply_sentinel_and_real_nulls_both_filled(self):
+        # Mixed column: real NaN + sentinel -999.0. Both should be filled.
+        data = [20.0, None, 25.0, -999.0, 22.0, None, 28.0,
+                21.0, 24.0, 26.0, 23.0, 27.0, 20.0, 25.0,
+                22.0, 24.0, 21.0, 26.0, 23.0, 25.0]
+        df = pd.DataFrame({"temp": data})
+        recs = {
+            "columns": {
+                "temp": {
+                    "type": "float",
+                    "nullable": True,
+                    "missing_values": {"strategy": "median", "value": None},
+                    "normalize": False,
+                    "warnings": [],
+                    "note": None,
+                    "sentinel_values": [-999.0],
+                }
+            },
+            "duplicates": {},
+            "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["temp"].isna().sum() == 0
+        assert -999.0 not in result["temp"].values
+
+    def test_apply_no_sentinel_values_field_is_safe(self):
+        # Columns without sentinel_values key must not raise errors.
+        df = pd.DataFrame({"salary": [50000.0, None, 70000.0]})
+        recs = {
+            "columns": {
+                "salary": {
+                    "type": "float",
+                    "nullable": True,
+                    "missing_values": {"strategy": "median", "value": None},
+                    "normalize": False,
+                    "warnings": [],
+                    "note": None,
+                }
+            },
+            "duplicates": {},
+            "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert result["salary"].isna().sum() == 0

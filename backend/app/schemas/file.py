@@ -1,8 +1,9 @@
+import re
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.app.db.models.run import RunStatus
 
@@ -11,47 +12,60 @@ from backend.app.db.models.run import RunStatus
 # Recommendations validation schema
 # ---------------------------------------------------------------------------
 
-class ColumnSchema(BaseModel):
-    type: Literal["int", "float", "string", "date", "bool"]
-    nullable: bool = True
-
-
-class MissingValueStrategy(BaseModel):
-    strategy: Literal["median", "mean", "mode", "fill", "drop_row"]
+class MissingValuesFill(BaseModel):
+    strategy: Literal["median", "mean", "mode", "fill", "drop_row", "drop_column", "leave_null"]
     value: str | int | float | None = None  # required when strategy == "fill"
 
     @model_validator(mode="after")
-    def value_required_for_fill(self) -> "MissingValueStrategy":
+    def value_required_for_fill(self) -> "MissingValuesFill":
         if self.strategy == "fill" and self.value is None:
             raise ValueError("'value' is required when strategy is 'fill'")
         return self
 
 
+class ColumnConfig(BaseModel):
+    type: Literal["int", "float", "string", "date", "bool"]
+    nullable: bool = True
+    missing_values: MissingValuesFill | None = None
+    normalize: Literal["min_max", "z_score", False] = False
+    warnings: list[str] = Field(default_factory=list)
+    note: str | None = None
+    rename_to: str | None = None
+    sentinel_values: list[float] | None = None
+
+    @field_validator("rename_to")
+    @classmethod
+    def rename_to_must_be_identifier(cls, v: str | None) -> str | None:
+        if v is not None and not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", v):
+            raise ValueError(
+                f"rename_to='{v}' is not a valid identifier — use snake_case "
+                f"(letters, digits, underscores; must start with a letter or underscore)"
+            )
+        return v
+
+
 class DuplicatesConfig(BaseModel):
-    strategy: Literal["drop", "keep_first", "keep_last"]
+    # "ignore" is the default so an empty duplicates dict {} still validates cleanly.
+    strategy: Literal["drop", "ignore"] = "ignore"
     subset: list[str] = Field(default_factory=list)
     keep: Literal["first", "last"] = "first"
 
 
-class NormalizationConfig(BaseModel):
-    columns: list[str] = Field(default_factory=list)
-
-
-class CustomTransform(BaseModel):
-    description: str
-    type: Literal["computed_column", "rename_column", "filter_rows", "cast_type"]
-    output_column: str
-    logic: str
+class OutliersConfig(BaseModel):
+    strategy: Literal["keep", "winsorise", "remove", "cap"] = "keep"
+    method: Literal["iqr"] = "iqr"
+    lower: float | None = None
+    upper: float | None = None
 
 
 class RecommendationsSchema(BaseModel):
     """Validated structure of the recommendations JSON produced by DQ flow and edited by users."""
 
-    schema_: dict[str, ColumnSchema] = Field(default_factory=dict, alias="schema")
-    missing_values: dict[str, MissingValueStrategy] = Field(default_factory=dict)
+    columns: dict[str, ColumnConfig] = Field(default_factory=dict)
     duplicates: DuplicatesConfig | None = None
-    normalization: NormalizationConfig | None = None
-    custom_transforms: list[CustomTransform] = Field(default_factory=list)
+    outliers: dict[str, OutliersConfig] = Field(default_factory=dict)
+    # custom_transforms: pass-through — not strictly validated here
+    custom_transforms: list[dict[str, Any]] = Field(default_factory=list)
     # _metadata is pass-through
     metadata_: dict[str, Any] = Field(default_factory=dict, alias="_metadata")
 

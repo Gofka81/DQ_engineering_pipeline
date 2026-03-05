@@ -55,7 +55,6 @@ services:
       PREFECT_RESULTS_DEFAULT_SERIALIZER: "pickle"
       PREFECT_RESULTS_PERSIST_BY_DEFAULT: "true"
       PYTHONPATH: /prefect
-      LLM_API_KEY: ${LLM_API_KEY:-}
       # Override hostnames for Docker network
       POSTGRES_HOST: postgres
       MINIO_ENDPOINT: minio:9000

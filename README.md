@@ -1,102 +1,101 @@
 # Data Quality Engineering Pipeline
 
-Automated data quality analysis and transformation system. Upload a CSV, get AI-powered recommendations, review and apply transformations, download cleaned data.
+Automated data quality analysis and transformation system. Upload a CSV, get scored recommendations, review and edit them, apply transformations, download the cleaned file.
 
-**Goal:** Reduce manual work for data engineers and make data quality analysis accessible, reproducible, and intelligent.
-
----
-
-## 🌟 Features
-
-- **Automated DQ Analysis** - Upload CSV → get completeness, uniqueness, validity, and consistency scores
-- **AI-Powered Recommendations** - Smart suggestions for handling missing values, duplicates, normalization, and custom transforms
-- **Interactive Review** - Review and edit recommendations via API before applying
-- **Transformation Pipeline** - Apply approved transformations with before/after quality comparison
-- **User Isolation** - Secure multi-tenant system with JWT authentication
-- **Async Architecture** - FastAPI + Prefect + Redis for scalable processing
+**Goal:** Reduce manual work for data engineers and make data quality analysis accessible, reproducible, and auditable.
 
 ---
 
-## 🏗️ Architecture
+## Features
+
+- **Automated DQ Analysis** — Upload CSV → profile data → get completeness, uniqueness, validity, and consistency scores (5 scores: overall + 4 dimensions)
+- **Smart Recommendations** — Deterministic rule-based suggestions aligned with DAMA DMBOK dimensions: missing value strategies (MCAR/MAR/MNAR-aware), duplicate removal, type casting, normalization, and outlier detection
+- **LLM Enrichment** — Groq (Llama 3.3 70B) enriches recommendations with semantic reasoning: MNAR leave_null detection, column rename suggestions, and plain-English notes per column
+- **Interactive Review** — Review and edit recommendations JSON via API before applying any changes
+- **Transform Pipeline** — Apply approved transformations, recalculate DQ scores, save cleaned file to curated storage
+- **Before / After Comparison** — Every run stores DQ scores before and after transform for full auditability
+- **User Isolation** — Secure multi-tenant system with JWT authentication; each user sees only their own files
+- **Async Architecture** — FastAPI + Prefect 3 + Redis for scalable, non-blocking processing
+
+---
+
+## Architecture
 
 ```
-┌─────────────┐
-│   User      │
-└──────┬──────┘
-       │ 1. Upload CSV
-       ↓
-┌─────────────────────────────────────────────────────────────┐
-│                     FastAPI Backend                         │
-│  • JWT Auth  • File Upload  • Status Polling                │
-└──────┬──────────────────────────────────────────────────────┘
-       │ 2. Save to MinIO (raw) + Metadata to PostgreSQL
-       ↓
-┌─────────────────────┐        ┌──────────────────┐
-│      MinIO          │        │   PostgreSQL     │
-│  Buckets:           │        │  Tables:         │
-│  • raw-zone         │        │  • users         │
-│  • curated-zone     │        │  • files         │
-└─────────────────────┘        │  • runs          │
-       │                       └──────────────────┘
-       │ 3. Push job to Redis queue
-       ↓
-┌─────────────────────┐
-│   Redis Queue       │
-│   (dq_jobs)         │
-└──────┬──────────────┘
-       │ 4. Redis Worker picks up job
-       ↓
-┌─────────────────────────────────────────────────────────────┐
-│                    Prefect Worker                           │
-│  ┌────────────────┐              ┌────────────────┐         │
-│  │  DQ Flow       │              │ Transform Flow │         │
-│  │  • Profile     │              │ • Apply recs   │         │
-│  │  • Score       │              │ • Save result  │         │
-│  │  • Recommend   │─────────────>│ • Update score │         │
-│  └────────────────┘              └────────────────┘         │
-└─────────────────────────────────────────────────────────────┘
-       │ 5. Save recommendations to DB
-       ↓
-┌─────────────────────┐
-│   User Reviews &    │
-│   Edits JSON        │
-└──────┬──────────────┘
-       │ 6. Approve recommendations
-       ↓
-┌─────────────────────┐
-│  Cleaned CSV in     │
-│  curated-zone       │
-└─────────────────────┘
+User uploads CSV
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│            FastAPI Backend              │
+│  JWT Auth · File Upload · Status Poll   │
+└────┬──────────────────────────┬─────────┘
+     │ Save to MinIO (raw)      │ Save metadata
+     │ Push job → Redis         │       │
+     ▼                          ▼       ▼
+┌──────────┐            ┌───────────────────┐
+│  MinIO   │            │    PostgreSQL      │
+│  • raw   │            │  users / files /  │
+│  • curated│           │  runs (JSONB DQ   │
+└──────────┘            │  scores + recs)   │
+                        └───────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────────┐
+│          prefect-worker container       │
+│                                         │
+│  ┌────────────────┐                     │
+│  │ redis_worker   │  BRPOP on "jobs"    │
+│  │ (background)   │  routes by job_type │
+│  └────┬───────────┘                     │
+│       │ run_deployment()                │
+│       ▼                                 │
+│  ┌────────────────┐  ┌───────────────┐  │
+│  │  DQ Analysis   │  │   Transform   │  │
+│  │  Flow          │  │   Flow        │  │
+│  │  • profile     │  │  • load recs  │  │
+│  │  • score (5)   │  │  • apply recs │  │
+│  │  • recommend   │  │  • score (5)  │  │
+│  └────────────────┘  │  • upload CSV │  │
+│                      └───────────────┘  │
+└─────────────────────────────────────────┘
+     │
+     ▼
+User reviews recommendations (AWAITING_REVIEW)
+     │ PUT /recommendations
+     ▼
+Transform triggered → status COMPLETED
+     │
+     ▼
+Presigned download URL for cleaned CSV
 ```
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **API** | FastAPI | REST endpoints with async support |
-| **Auth** | JWT + Argon2 | Secure authentication & password hashing |
-| **Orchestration** | Prefect 3 | Workflow automation (DQ + Transform flows) |
-| **Database** | PostgreSQL 16 | Metadata storage (users, files, runs) |
-| **Object Storage** | MinIO | S3-compatible CSV storage (raw/curated zones) |
-| **Queue** | Redis | Job queue (LPUSH/BRPOP pattern) |
-| **AI** | Anthropic Claude | LLM for custom transforms (planned) |
+| **API** | FastAPI | REST endpoints, async request handling |
+| **Auth** | JWT + Argon2 | Secure authentication and password hashing |
+| **Orchestration** | Prefect 3 | DQ Analysis and Transform workflow automation |
+| **Queue** | Redis | Job queue (LPUSH / BRPOP pattern) |
+| **Database** | PostgreSQL 16 | Metadata: users, files, runs, JSONB DQ scores |
+| **Object Storage** | MinIO | S3-compatible CSV storage (raw / curated buckets) |
+| **AI** | Groq + Llama 3.3 70B | LLM enrichment — MNAR leave_null, rename suggestions, notes |
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
-- **Docker** & **Docker Compose** (v3.8+)
-- **Python 3.11+** (for local backend development)
-- **Git**
-- **curl** or **Postman** (for API testing)
+- **Docker** and **Docker Compose**
+- **Python 3.11+** (for running the backend locally)
+- **curl** or any HTTP client for API testing
 
 ---
 
-## 🚀 Setup Instructions (From Scratch)
+## Setup Instructions
 
-### Step 1: Clone Repository
+### Step 1: Clone the Repository
 
 ```bash
 git clone <repository-url>
@@ -105,13 +104,11 @@ cd DQ_engineering_pipeline
 
 ### Step 2: Configure Environment Variables
 
-Create a `.env` file in the project root:
-
 ```bash
-cp .env.example .env  # If example exists, otherwise create manually
+cp .env.example .env
 ```
 
-**Required `.env` configuration:**
+Edit `.env` with your values:
 
 ```bash
 # PostgreSQL
@@ -121,7 +118,7 @@ POSTGRES_DB=prefect
 POSTGRES_HOST=localhost
 BACKEND_DB=backend
 
-# MinIO (S3-compatible storage)
+# MinIO
 MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=minioadmin
 MINIO_ENDPOINT=localhost:9000
@@ -129,690 +126,477 @@ MINIO_ENDPOINT=localhost:9000
 # Redis
 REDIS_HOST=localhost
 REDIS_PORT=6379
-REDIS_DQ_QUEUE=dq_jobs
+REDIS_JOBS_QUEUE=jobs
 
-# JWT Authentication
-SECRET_KEY=your-super-secret-key-change-this-in-production
+# JWT
+SECRET_KEY=your-super-secret-key-change-this
 ACCESS_TOKEN_EXPIRE_MINUTES=1440
 ENVIRONMENT=development
 
 # File Upload
 MAX_FILE_SIZE_MB=200
 
-# Anthropic API (for LLM features - optional for now)
-ANTHROPIC_API_KEY=your-anthropic-api-key
+# Groq API (LLM enrichment — optional, falls back to baseline if unset)
+# LLM_API_KEY=your-groq-key-here
 ```
 
-> **Security Note:** Change `SECRET_KEY` to a strong random value in production. Generate with:
-> ```bash
-> python -c "import secrets; print(secrets.token_urlsafe(32))"
-> ```
+> Generate a strong secret key: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 
-### Step 3: Start Infrastructure Services
+### Step 3: Start Infrastructure
 
 ```bash
 docker-compose up -d postgres-prefect redis minio
 ```
 
-**Verify services are running:**
+### Step 4: Initialise the Database
+
+The PostgreSQL container auto-creates the `prefect` database. The `backend` database must be created manually:
 
 ```bash
-docker ps
-# You should see: postgres, redis, minio containers running
-```
+# Create backend database
+docker exec -it postgres psql -U prefect -d prefect -c "CREATE DATABASE backend;"
 
-### Step 4: Initialize Databases
-
-The PostgreSQL container only creates the `prefect` database automatically. We need to manually create the `backend` database.
-
-**Connect to PostgreSQL:**
-
-```bash
-docker exec -it postgres psql -U prefect -d prefect
-```
-
-**Create backend database and tables:**
-
-```sql
--- Create backend database
-CREATE DATABASE backend;
-
--- Connect to backend database
-\c backend
-
--- Run init.sql schema
--- Exit psql (Ctrl+D) and run:
-```
-
-```bash
-# Apply schema from host machine
+# Apply schema (users, files, runs tables + run_status enum)
 docker exec -i postgres psql -U prefect -d backend < init.sql
 ```
 
-**Verify tables were created:**
+Verify:
 
 ```bash
-docker exec -it postgres psql -U prefect -d backend -c "\dt"
+docker exec postgres psql -U prefect -d backend -c "\dt"
+# Expected: users, files, runs
 ```
 
-You should see: `users`, `files`, `runs` tables.
-
-### Step 5: Create MinIO Buckets
-
-MinIO requires manual bucket creation.
-
-**Option A: Using MinIO Console (GUI)**
-
-1. Open browser: http://localhost:9001
-2. Login with credentials:
-   - Username: `minioadmin`
-   - Password: `minioadmin`
-3. Create two buckets:
-   - `raw-zone`
-   - `curated-zone`
-
-**Option B: Using MinIO Client (CLI)**
-
-```bash
-# Install mc (MinIO Client)
-docker run --rm --network dq_engineering_pipeline_default \
-  --entrypoint=/bin/sh minio/mc -c "
-  mc alias set local http://minio:9000 minioadmin minioadmin &&
-  mc mb local/raw-zone &&
-  mc mb local/curated-zone
-  "
-```
-
-### Step 6: Start Prefect Server
+### Step 5: Start Prefect Server
 
 ```bash
 docker-compose up -d prefect-server
 ```
 
-**Wait for Prefect server to be ready (~30 seconds):**
+Wait ~30 seconds, then verify at http://localhost:4200.
 
-```bash
-docker logs -f prefect-server
-# Wait for: "Uvicorn running on http://0.0.0.0:4200"
-```
-
-**Verify Prefect UI:**
-
-Open browser: http://localhost:4200
-
-### Step 7: Start Prefect Worker (Auto-deploys flows)
+### Step 6: Build and Start Prefect Worker
 
 ```bash
 docker-compose up -d --build prefect-worker
 ```
 
-This container:
-1. **Auto-deploys** Prefect flows via `prefect deploy --all`
-2. Starts **Redis worker** (background process listening on `dq_jobs` queue)
-3. Starts **Prefect worker** (picks up flow runs from Prefect server)
+This container automatically:
+1. Runs `prefect deploy --all` — registers both `DQ Analysis/dq-analysis` and `Transform/transform` deployments
+2. Starts `redis_worker.py` as a background process (BRPOP on `jobs` queue)
+3. Starts the Prefect worker process (executes flow runs)
 
-**Verify deployment:**
-
-```bash
-docker logs prefect-worker
-# Look for: "Successfully created/updated all deployments!"
-```
-
-**Check Prefect UI:**
-
-Go to http://localhost:4200/deployments - you should see `dq-analysis` deployment.
-
-### Step 8: Run FastAPI Backend
-
-**Option A: Run in Docker (Production-like)**
+Verify both deployments registered:
 
 ```bash
-# Add backend service to docker-compose.yaml (not yet included)
-# For now, run locally:
+docker logs prefect-worker | grep "successfully created"
+# Deployment 'DQ Analysis/dq-analysis' successfully created...
+# Deployment 'Transform/transform' successfully created...
 ```
 
-**Option B: Run Locally (Development - Recommended)**
+### Step 7: Start the FastAPI Backend
 
 ```bash
 cd backend
-
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate       # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Run FastAPI with auto-reload
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**Verify backend is running:**
-
-Open browser: http://localhost:8000/docs (FastAPI interactive documentation)
+API docs available at http://localhost:8000/docs.
 
 ---
 
-## ✅ Verification Checklist
+## Service URLs
 
-After setup, verify all services:
-
-```bash
-# Check all containers are running
-docker ps
-
-# Expected containers:
-# - postgres
-# - redis
-# - minio
-# - prefect-server
-# - prefect-worker
-
-# Test connectivity
-curl http://localhost:8000/docs        # FastAPI docs
-curl http://localhost:4200             # Prefect UI
-curl http://localhost:9001             # MinIO console
-```
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| FastAPI docs | http://localhost:8000/docs | — |
+| Prefect UI | http://localhost:4200 | — |
+| MinIO console | http://localhost:9001 | minioadmin / minioadmin |
+| PostgreSQL | localhost:5432 | prefect / prefect |
+| Redis | localhost:6379 | — |
 
 ---
 
-## 🧪 Quick Start Guide
+## Quick Start: End-to-End Test
 
-### 1. Register a User
+### 1. Register
 
 ```bash
-curl -X POST "http://localhost:8000/api/auth/register" \
+curl -X POST http://localhost:8000/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "username": "testuser",
-    "email": "test@example.com",
-    "password": "securepassword123"
-  }'
+  -d '{"username": "testuser", "email": "test@example.com", "password": "password123"}'
 ```
 
-**Response:**
-```json
-{
-  "id": 1,
-  "username": "testuser",
-  "email": "test@example.com",
-  "disabled": false,
-  "created_at": "2026-02-16T..."
-}
-```
-
-### 2. Login (Get JWT Token)
+### 2. Login
 
 ```bash
-curl -X POST "http://localhost:8000/api/auth/login" \
+curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=testuser&password=securepassword123"
+  -d "username=testuser&password=password123"
 ```
 
-**Response:**
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer"
-}
-```
+Save the `access_token` from the response.
 
-**Save this token** - you'll need it for subsequent requests.
-
-### 3. Upload a CSV File
-
-Create a test CSV file:
+### 3. Upload a CSV
 
 ```bash
-cat > test.csv << EOF
-name,age,salary,department
-Alice,30,75000,Engineering
-Bob,25,,Sales
-Charlie,35,90000,Engineering
-Alice,30,75000,Engineering
-EOF
-```
+TOKEN="your-token-here"
 
-Upload the file:
-
-```bash
-TOKEN="your-access-token-from-step-2"
-
-curl -X POST "http://localhost:8000/api/files/upload" \
+curl -X POST http://localhost:8000/api/files/upload \
   -H "Authorization: Bearer $TOKEN" \
-  -F "file=@test.csv"
+  -F "file=@your_data.csv"
 ```
 
-**Response:**
+Response:
 ```json
 {
-  "file_id": "a1b2c3d4-...",
-  "run_id": "e5f6g7h8-...",
-  "message": "File uploaded successfully. DQ analysis job queued.",
+  "id": "uuid-file-id",
+  "run_id": "uuid-run-id",
   "status": "PENDING"
 }
 ```
 
-### 4. Poll Run Status
+### 4. Poll Status
 
 ```bash
-FILE_ID="a1b2c3d4-..."  # From upload response
+FILE_ID="uuid-file-id"
 
-curl -X GET "http://localhost:8000/api/files/$FILE_ID/status" \
+curl http://localhost:8000/api/files/$FILE_ID/status \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-**Status progression:**
-- `PENDING` → File uploaded, job queued
-- `ANALYZING` → Prefect flow is running DQ analysis
-- `AWAITING_REVIEW` → Recommendations generated, ready for review
-- `TRANSFORMING` → Applying approved transformations
-- `COMPLETED` → Done, cleaned file available
-- `FAILED` → Error occurred (check `error_message`)
+Status progression: `PENDING → ANALYZING → AWAITING_REVIEW → TRANSFORMING → COMPLETED`
 
-### 5. Get Recommendations (When status = AWAITING_REVIEW)
-
-```bash
-curl -X GET "http://localhost:8000/api/files/$FILE_ID/recommendations" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Response (example):**
+When `AWAITING_REVIEW`, response includes all 5 DQ scores:
 ```json
 {
-  "schema": {
-    "name": {"type": "string", "nullable": false},
-    "age": {"type": "int", "nullable": false},
-    "salary": {"type": "float", "nullable": true},
-    "department": {"type": "string", "nullable": false}
+  "status": "AWAITING_REVIEW",
+  "dq_scores_before": {
+    "overall": 97.77,
+    "completeness": 96.29,
+    "uniqueness": 100.0,
+    "validity": 96.29,
+    "consistency": 100.0
   },
-  "missing_values": {
-    "salary": {
-      "strategy": "median",
-      "value": null
-    }
-  },
-  "duplicates": {
-    "strategy": "drop",
-    "subset": [],
-    "keep": "first"
-  },
-  "normalization": {
-    "columns": ["name", "department"]
-  },
-  "custom_transforms": [],
-  "_metadata": {
-    "generated_at": "2026-02-16T10:30:00Z",
-    "dq_score": 67.5,
-    "issues_found": {
-      "missing_values": 1,
-      "duplicate_rows": 1
+  "dq_scores_after": null
+}
+```
+
+### 5. Get Recommendations
+
+```bash
+curl http://localhost:8000/api/files/$FILE_ID/recommendations \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Response:
+```json
+{
+  "recommendations": {
+    "columns": {
+      "salary": {
+        "type": "float", "nullable": true,
+        "missing_values": {"strategy": "median", "value": 72500.0},
+        "normalize": true, "warning": null,
+        "note": "Right-skewed distribution — median is more robust than mean here."
+      },
+      "age": {
+        "type": "int", "nullable": false,
+        "missing_values": null,
+        "normalize": false, "warning": null, "note": null
+      }
+    },
+    "duplicates": {"strategy": "drop", "subset": [], "keep": "first"},
+    "custom_transforms": [],
+    "_metadata": {
+      "dq_score": 97.77,
+      "generated_at": "2026-03-01T...",
+      "issues_found": {"missing": 26, "duplicates": 0, "type_mismatches": 0}
     }
   }
 }
 ```
 
-### 6. Review & Edit Recommendations (Optional)
-
-Edit the JSON as needed, then submit:
+### 6. Approve (and optionally edit) Recommendations
 
 ```bash
-curl -X PUT "http://localhost:8000/api/files/$FILE_ID/recommendations" \
+curl -X PUT http://localhost:8000/api/files/$FILE_ID/recommendations \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "schema": { ... },
-    "missing_values": {
-      "salary": {
-        "strategy": "mean",
-        "value": null
-      }
-    },
-    "duplicates": {
-      "strategy": "drop",
-      "keep": "first"
-    },
-    "normalization": {
-      "columns": ["name", "department"]
-    },
-    "custom_transforms": []
-  }'
+  -d '{"recommendations": { ...edited json... }}'
 ```
 
-This triggers the **Transform Flow** (when implemented).
+This triggers the Transform flow immediately. Status moves to `TRANSFORMING`.
 
 ### 7. Download Cleaned File
 
-```bash
-RUN_ID="e5f6g7h8-..."  # From upload response
+When status is `COMPLETED`:
 
-curl -X GET "http://localhost:8000/api/runs/$RUN_ID/download" \
+```bash
+RUN_ID="uuid-run-id"
+
+curl http://localhost:8000/api/runs/$RUN_ID/download \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-**Response:**
+Response:
 ```json
 {
-  "download_url": "http://localhost:9000/curated-zone/...",
-  "filename": "test_cleaned.csv",
-  "expires_in_seconds": 3600
+  "download_url": "http://localhost:9000/curated/file-id/run-id/cleaned.csv?...",
+  "expires_in_hours": 1
 }
 ```
 
-Use the `download_url` to download the cleaned CSV (presigned URL, valid for 1 hour).
+Use the presigned URL to download the cleaned CSV directly.
 
 ---
 
-## 📂 Project Structure
+## DQ Score Formula
 
-```
-.
-├── backend/                    # FastAPI application
-│   ├── app/
-│   │   ├── api/
-│   │   │   ├── auth.py        # Auth endpoints (register, login)
-│   │   │   └── files.py       # File upload, status, recommendations, download
-│   │   ├── core/
-│   │   │   ├── config.py      # Pydantic Settings
-│   │   │   ├── security.py    # JWT + Argon2 hashing
-│   │   │   ├── minio_service.py   # MinIO client (singleton)
-│   │   │   └── redis_service.py   # Redis job queue client
-│   │   ├── db/
-│   │   │   ├── engine.py      # Async PostgreSQL connection pool
-│   │   │   └── models/        # User, File, Run models (asyncpg)
-│   │   ├── schemas/           # Pydantic request/response models
-│   │   ├── dependencies.py    # FastAPI dependencies (auth, DB)
-│   │   └── main.py           # FastAPI app initialization
-│   └── requirements.txt
-│
-├── prefect/                   # Prefect workflows
-│   ├── flows/
-│   │   └── dq_flow.py        # DQ Analysis flow (7 tasks)
-│   ├── redis_worker.py       # Redis BRPOP worker → triggers Prefect
-│   ├── prefect.yaml          # Deployment configuration
-│   ├── Dockerfile            # Prefect worker image
-│   └── requirements.txt
-│
-├── init.sql                  # Database schema (users, files, runs)
-├── docker-compose.yaml       # Service orchestration
-├── .env                      # Environment variables
-├── CLAUDE.md                 # AI assistant instructions
-└── README.md                 # This file
-```
+Five scores are stored per run (before and after transform):
 
----
-
-## 🔌 API Endpoints
-
-### Authentication
-
-| Method | Endpoint | Description | Auth Required |
-|--------|----------|-------------|---------------|
-| POST | `/api/auth/register` | Register new user | No |
-| POST | `/api/auth/login` | Login → JWT token | No |
-
-### Files
-
-| Method | Endpoint | Description | Auth Required |
-|--------|----------|-------------|---------------|
-| POST | `/api/files/upload` | Upload CSV → triggers DQ flow | Yes |
-| GET | `/api/files` | List user's files | Yes |
-| GET | `/api/files/{file_id}` | Get file details | Yes |
-| GET | `/api/files/{file_id}/status` | Get latest run status | Yes |
-| GET | `/api/files/{file_id}/recommendations` | Get generated recommendations JSON | Yes |
-| PUT | `/api/files/{file_id}/recommendations` | Submit edited recommendations → triggers Transform flow | Yes |
-| GET | `/api/files/{file_id}/runs` | List all runs for file | Yes |
-
-### Runs
-
-| Method | Endpoint | Description | Auth Required |
-|--------|----------|-------------|---------------|
-| GET | `/api/runs/{run_id}` | Get run details | Yes |
-| GET | `/api/runs/{run_id}/download` | Download cleaned file (presigned URL) | Yes |
-
-**Full interactive documentation:** http://localhost:8000/docs
-
----
-
-## 🔧 Development Workflow
-
-### Making Code Changes
-
-**Backend changes:**
-```bash
-cd backend
-# Code is auto-reloaded if running with --reload flag
-```
-
-**Prefect flow changes:**
-```bash
-# Edit files in prefect/flows/
-# Rebuild and restart worker:
-docker-compose up -d --build prefect-worker
-
-# Verify deployment updated:
-docker logs prefect-worker | grep "Successfully"
-```
-
-### Viewing Logs
-
-```bash
-# FastAPI backend (if running locally)
-# Logs appear in terminal
-
-# Prefect worker (redis worker + flow execution)
-docker logs -f prefect-worker
-
-# Prefect server
-docker logs -f prefect-server
-
-# PostgreSQL
-docker logs postgres
-
-# Redis
-docker logs redis
-
-# MinIO
-docker logs minio
-```
-
-### Database Access
-
-```bash
-# Connect to PostgreSQL
-docker exec -it postgres psql -U prefect -d backend
-
-# Run queries
-SELECT * FROM users;
-SELECT * FROM files;
-SELECT * FROM runs;
-
-# Exit
-\q
-```
-
-### Testing Prefect Flows Manually
-
-```bash
-# Enter prefect-worker container
-docker exec -it prefect-worker bash
-
-# Run flow manually (bypass Redis queue)
-python -c "from flows.dq_flow import dq_analysis_flow; dq_analysis_flow(run_id='test-123', file_id='test-456', minio_raw_path='raw-zone/test.csv')"
-```
-
----
-
-## 🐛 Troubleshooting
-
-### Issue: Prefect worker can't connect to server
-
-**Symptoms:** Logs show connection refused errors.
-
-**Solution:**
-```bash
-# Verify prefect-server is running
-docker ps | grep prefect-server
-
-# Restart services in order
-docker-compose restart prefect-server
-docker-compose restart prefect-worker
-```
-
-### Issue: Backend can't connect to PostgreSQL
-
-**Symptoms:** `asyncpg.exceptions.InvalidCatalogNameError: database "backend" does not exist`
-
-**Solution:**
-```bash
-# Manually create backend database (Step 4)
-docker exec -it postgres psql -U prefect -d prefect -c "CREATE DATABASE backend;"
-docker exec -i postgres psql -U prefect -d backend < init.sql
-```
-
-### Issue: File upload returns 500 error
-
-**Check:**
-1. MinIO buckets exist (`raw-zone`, `curated-zone`)
-2. Redis is running (`docker ps | grep redis`)
-3. Backend logs for detailed error
-
-### Issue: DQ flow never starts
-
-**Check:**
-```bash
-# Verify Redis worker is running
-docker logs prefect-worker | grep "Redis worker"
-
-# Check Redis queue has jobs
-docker exec -it redis redis-cli LLEN dq_jobs
-
-# Verify deployment exists in Prefect UI
-# http://localhost:4200/deployments
-```
-
-### Issue: "Permission denied" when running docker commands
-
-**Solution:**
-```bash
-# Add user to docker group (Linux)
-sudo usermod -aG docker $USER
-# Log out and back in
-
-# Or use sudo
-sudo docker-compose up -d
-```
-
----
-
-## 🔐 Security Considerations
-
-- **Never commit `.env` to version control** (add to `.gitignore`)
-- **Change default passwords** in production (PostgreSQL, MinIO, JWT secret)
-- **Use HTTPS** in production (not HTTP)
-- **Limit file upload size** (configured via `MAX_FILE_SIZE_MB`)
-- **Validate user input** in custom transforms (prevent code injection)
-- **Enable MinIO access policies** for production deployments
-
----
-
-## 📊 DQ Score Formula
-
-The data quality score is a weighted average of four components:
-
-| Component | Weight | Calculation |
-|-----------|--------|-------------|
+| Dimension | Weight | Formula |
+|-----------|--------|---------|
 | **Completeness** | 35% | `(1 - missing_cells / total_cells) × 100` |
 | **Uniqueness** | 25% | `(1 - duplicate_rows / total_rows) × 100` |
 | **Validity** | 25% | `(type_conforming_cells / total_cells) × 100` |
 | **Consistency** | 15% | `(pattern_matching_cells / total_cells) × 100` |
+| **Overall** | — | Weighted composite of the four above |
 
-**Current Status:**
-- ✅ Completeness & Uniqueness: Fully implemented
-- ⚠️ Validity & Consistency: Hardcoded to 100% (TODO)
-
----
-
-## 🗺️ Roadmap
-
-### Phase 0: Documentation ✅
-- [x] Comprehensive README with setup instructions
-
-### Phase 1: Complete DQ Flow (In Progress)
-- [ ] Real MinIO file downloads in Prefect
-- [ ] Database writes for run status updates
-- [ ] Implement Validity & Consistency metrics
-
-### Phase 2: Transform Flow
-- [ ] Create `transform_flow.py` in Prefect
-- [ ] Apply transformations based on approved JSON
-- [ ] Calculate before/after DQ scores
-- [ ] Save cleaned file to `curated-zone`
-
-### Phase 3: LLM Integration
-- [ ] Anthropic API integration for custom transforms
-- [ ] Natural language → pandas code generation
-- [ ] Validation & retry logic (max 3 attempts)
-
-### Phase 4: Polish
-- [ ] Comprehensive error handling
-- [ ] Integration tests
-- [ ] User preference tracking (ML model)
-- [ ] Performance optimization
+Validity checks object-typed columns for type conformance (e.g. `"N/A"` in a numeric column = invalid).
+Consistency checks string columns against known patterns (email, phone, URL, ISO date, UUID, UK postcode).
 
 ---
 
-## 🤝 Contributing
+## Recommendations Schema
 
-1. Create a feature branch: `git checkout -b feature/your-feature`
-2. Make changes and test locally
-3. Commit with descriptive message: `git commit -m "Add feature X"`
-4. Push and create pull request
+Column-centric format — all decisions for a column live in one place:
+
+```json
+{
+  "columns": {
+    "<col>": {
+      "type":           "int|float|string|date|bool",
+      "nullable":       true,
+      "missing_values": {"strategy": "median|mean|mode|fill|drop_row|drop_column|leave_null", "value": null},
+      "normalize":      false,
+      "warning":        "human-readable impact message or null",
+      "note":           "LLM explanation or null",
+      "rename_to":      "new_name or null"
+    }
+  },
+  "duplicates": {"strategy": "drop", "subset": [], "keep": "first|last"},
+  "custom_transforms": [],
+  "_metadata": {
+    "generated_at": "ISO timestamp",
+    "dq_score": 97.77,
+    "issues_found": {"missing": 0, "duplicates": 0, "type_mismatches": 0}
+  }
+}
+```
+
+**Fill strategies:**
+- `median` — skewed numeric columns (outliers present; robust to extreme values)
+- `mean` — symmetric numeric columns (no significant outliers)
+- `mode` — bool and low-cardinality string columns (likely categorical)
+- `drop_row` — ID/key columns, pattern columns (email/phone/UUID), date columns
+- `drop_column` — columns ≥50% missing with no structural null pattern
+- `leave_null` — intentional nulls (MAR: correlated with another column; MNAR: domain-sparse e.g. event dates)
+- `fill` — literal value from the `value` field (user-defined)
+
+See `docs/recommendations.md` for the full framework and decision rules.
 
 ---
 
-## 📝 License
+## Project Structure
 
-[Add your license here]
+```
+.
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── auth.py             # Register, login endpoints
+│   │   │   └── files.py            # Upload, status, recommendations, download
+│   │   ├── core/
+│   │   │   ├── config.py           # Pydantic Settings (env vars)
+│   │   │   ├── security.py         # JWT + Argon2
+│   │   │   ├── minio_service.py    # MinIO client singleton
+│   │   │   └── redis_service.py    # Redis push_job()
+│   │   ├── db/
+│   │   │   ├── engine.py           # Async PostgreSQL pool (asyncpg)
+│   │   │   └── models/             # User, File, Run SQLAlchemy models
+│   │   ├── schemas/                # Pydantic request/response models
+│   │   ├── dependencies.py         # get_current_active_user
+│   │   └── main.py                 # FastAPI app
+│   └── requirements.txt
+│
+├── prefect/
+│   ├── flows/
+│   │   ├── dq_flow.py              # DQ Analysis Prefect flow (6 tasks)
+│   │   ├── transform_flow.py       # Transform Prefect flow (6 tasks)
+│   │   └── dq_logic.py             # Pure business logic (no Prefect imports)
+│   ├── tests/
+│   │   ├── test_dq_logic.py        # Unit tests for dq_logic.py
+│   │   ├── test_llm_enrichment.py  # Unit tests for llm_enrichment.py (220 total)
+│   │   └── test_llm_live.py        # Live LLM tests with prompt logging + token analytics
+│   ├── clients.py                  # MinIO + PostgreSQL client factories
+│   ├── redis_worker.py             # BRPOP worker → routes to Prefect deployments
+│   ├── prefect.yaml                # Deployment config (dq-analysis + transform)
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── test_data/                      # Sample CSVs for LLM live testing (generated)
+│   ├── generate_datasets.py        # Generator script (run once to create CSVs)
+│   ├── ecomm_orders_small.csv      # 100 rows, 7 cols — skewed amounts, sentinel discounts
+│   ├── medical_labs_medium.csv     # 300 rows, 10 cols — MNAR leave_null (adv_evt_dt 74% null)
+│   ├── finance_txn_medium.csv      # 350 rows, 9 cols — MAR leave_null (merchant null on ATM)
+│   ├── iot_sensors_large.csv       # 1200 rows, 8 cols — sentinel -999, real outliers
+│   ├── retail_catalog_wide.csv     # 500 rows, 13 cols — sparse column, sentinel "42%"
+│   └── crm_contacts_xlarge.csv     # 2000 rows, 12 cols — correlated nulls, bimodal values
+│
+├── init.sql                        # DB schema (users, files, runs + run_status enum)
+├── docker-compose.yaml
+├── .env.example
+└── CLAUDE.md
+```
 
 ---
 
-## 📞 Support
+## API Reference
 
-- **Issues:** [GitHub Issues](https://github.com/your-repo/issues)
-- **Documentation:** This README + http://localhost:8000/docs
-- **Prefect Docs:** https://docs.prefect.io
+### Auth
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/register` | Register new user |
+| POST | `/api/auth/login` | Login → JWT token |
+
+### Files
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/files/upload` | Upload CSV → triggers DQ Analysis flow |
+| GET | `/api/files` | List user's files |
+| GET | `/api/files/{file_id}` | File details |
+| GET | `/api/files/{file_id}/status` | Latest run status + DQ scores |
+| GET | `/api/files/{file_id}/recommendations` | Generated recommendations JSON |
+| PUT | `/api/files/{file_id}/recommendations` | Approve recommendations → triggers Transform flow |
+| GET | `/api/files/{file_id}/runs` | All runs for a file |
+
+### Runs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/runs/{run_id}` | Run details |
+| GET | `/api/runs/{run_id}/download` | Presigned download URL (COMPLETED only) |
 
 ---
 
-## 🎯 Quick Reference
+## Development
 
-**Service URLs:**
-- FastAPI Backend: http://localhost:8000
-- FastAPI Docs: http://localhost:8000/docs
-- Prefect UI: http://localhost:4200
-- MinIO Console: http://localhost:9001
-- PostgreSQL: localhost:5432
-- Redis: localhost:6379
+### Running Tests
 
-**Default Credentials:**
-- PostgreSQL: `prefect` / `prefect`
-- MinIO: `minioadmin` / `minioadmin`
+```bash
+# Unit tests (no API key needed) — 220 tests, all must pass before committing
+.venv/bin/python3 -m pytest prefect/tests/test_dq_logic.py prefect/tests/test_llm_enrichment.py -v
 
-**Key Commands:**
+# Live LLM tests (requires LLM_API_KEY)
+LLM_API_KEY=<key> .venv/bin/python3 prefect/tests/test_llm_live.py          # all datasets
+LLM_API_KEY=<key> .venv/bin/python3 prefect/tests/test_llm_live.py medical  # filter by name
+```
+
+### Updating Prefect Flows
+
+After any change to `prefect/flows/`:
+
+```bash
+docker-compose up -d --build prefect-worker
+docker logs prefect-worker | grep "successfully created"
+```
+
+### Useful Commands
+
 ```bash
 # Start all services
 docker-compose up -d
 
-# Stop all services
-docker-compose down
+# Check running containers
+docker-compose ps
 
-# View logs
-docker logs -f <container-name>
+# Follow worker logs (redis worker + flow execution)
+docker logs -f prefect-worker
 
-# Rebuild specific service
-docker-compose up -d --build <service-name>
+# Inspect DB
+docker exec postgres psql -U prefect -d backend -c "SELECT id, status, dq_scores_before, dq_scores_after FROM runs ORDER BY created_at DESC LIMIT 5;"
 
-# Clean restart (removes volumes)
-docker-compose down -v && docker-compose up -d
+# Check Redis queue depth
+docker exec redis redis-cli LLEN jobs
 ```
+
+---
+
+## Troubleshooting
+
+**`database "backend" does not exist`**
+```bash
+docker exec postgres psql -U prefect -d prefect -c "CREATE DATABASE backend;"
+docker exec -i postgres psql -U prefect -d backend < init.sql
+```
+
+**DQ flow never starts**
+```bash
+docker logs prefect-worker | grep -E "ERROR|Listening"
+docker exec redis redis-cli LLEN jobs    # should be 0 after worker picks up
+```
+
+**Transform flow fails with DB error**
+Check that the migration was applied (columns must be JSONB not FLOAT):
+```bash
+docker exec postgres psql -U prefect -d backend -c "\d runs"
+# dq_scores_before and dq_scores_after must show type: jsonb
+```
+
+---
+
+## Roadmap
+
+### Phase 1 — DQ Analysis Flow ✅
+- [x] CSV upload → MinIO (raw bucket)
+- [x] Redis job queue (LPUSH / BRPOP)
+- [x] Prefect DQ Analysis flow (profile → score → recommend)
+- [x] Completeness, Uniqueness, Validity, Consistency metrics
+- [x] Invalid cell detection (minority wrong-type values in object columns)
+- [x] 5-score output stored as JSONB (overall + 4 dimensions)
+
+### Phase 2 — Transform Flow ✅
+- [x] `apply_recommendations()` — schema cast, fill/drop, dedup, normalize
+- [x] Prefect Transform flow (load → apply → upload → score → save)
+- [x] Before / after DQ score comparison
+- [x] Presigned download URL for cleaned CSV
+- [x] Single Redis queue with `job_type` routing
+
+### Phase 3 — LLM Enrichment (In Progress)
+- [x] Groq + Llama 3.3 70B integration (replaced Anthropic)
+- [x] Compact CSV profile format for LLM (4× smaller than JSON)
+- [x] Partial diff format — LLM returns only changes, merged onto baseline
+- [x] Multi-attempt runner with validation and retry prompt
+- [x] Post-processing guards (echo strip, zero-null strip, no-op rename strip, note-only drop)
+- [x] Rate limit backoff
+- [ ] MAR leave_null — move `_correlated_nulls()` to `build_recommendations()` (currently in wrong file, not applied)
+- [ ] Mean vs median selection based on skewness (currently always median)
+- [ ] Narrow LLM prompt scope to semantic decisions only (MNAR + rename + notes)
+- [ ] Remove CORRELATED NULLS section from LLM profile (LLM ignores it; MAR moves to code)
+
+### Phase 4 — DQ Framework Completion (Next)
+- [ ] Sentinel value detection and recommendations (e.g. -999, "N/A" as string in all-string columns)
+- [ ] Outlier treatment integration into transform flow (currently detected, not applied)
+- [ ] Custom transform generation from natural language (LLM → pandas code)
+- [ ] Date format standardisation to ISO 8601 in transform
+
+### Phase 5 — Frontend
+- [ ] React UI for upload, review, and download
+- [ ] Visual DQ score dashboard (before / after)
+- [ ] Inline recommendation editor
