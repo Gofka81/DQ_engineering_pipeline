@@ -102,7 +102,7 @@ async def upload_file(
     await db.flush()  # Get the file ID
 
     # Create initial run
-    db_run = un(
+    db_run = Run(
         file_id=db_file.id,
         status=RunStatus.PENDING,
     )

@@ -46,3 +46,4 @@ dask-worker-space/
 # Logs
 logs
 *.log
+/frontend/node_modules/
