@@ -42,3 +42,7 @@ dask-worker-space/
 
 /prefect.yaml
 /CLAUDE.md
+
+# Logs
+logs
+*.log

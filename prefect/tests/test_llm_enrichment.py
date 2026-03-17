@@ -14,7 +14,10 @@ import pytest
 from flows.llm_enrichment import (
     _build_llm_profile,
     _sample_rows,
+    _validate_transform_ast,
+    _test_transform,
     enrich_recommendations,
+    generate_transform_code,
     validate_llm_output,
 )
 
@@ -277,6 +280,24 @@ class TestValidateLlmOutput:
         assert ok is True
         assert err == ""
 
+    def test_transform_hint_valid_string_accepted(self):
+        diff = {"columns": {"sal": {"transform_hint": "strip '%%' suffix and divide by 100", "note": "x"}}}
+        ok, err = validate_llm_output(diff, KNOWN)
+        assert ok is True
+        assert err == ""
+
+    def test_transform_hint_empty_string_rejected(self):
+        diff = {"columns": {"sal": {"transform_hint": "", "note": "x"}}}
+        ok, err = validate_llm_output(diff, KNOWN)
+        assert ok is False
+        assert "transform_hint" in err
+
+    def test_transform_hint_non_string_rejected(self):
+        diff = {"columns": {"sal": {"transform_hint": 123, "note": "x"}}}
+        ok, err = validate_llm_output(diff, KNOWN)
+        assert ok is False
+        assert "transform_hint" in err
+
     def test_all_errors_collected(self):
         """Multiple errors in one diff — all should appear in the error string."""
         diff = {
@@ -386,6 +407,43 @@ class TestEnrichRecommendations:
         assert mock_runner.call_count == 1
         assert result["columns"]["sal"]["rename_to"] == "salary"
 
+    def test_transform_hint_merged_onto_baseline(self, sample_profile, base_recs, sample_df):
+        """transform_hint set by LLM is merged into the column and stored in result."""
+        diff = {
+            "columns": {
+                "sal": {
+                    "transform_hint": "strip '%%' suffix from values like '50%%' and divide by 100",
+                    "type": "float",
+                    "note": "Salary stored with percent suffix — normalise to decimal.",
+                }
+            }
+        }
+        with patch.dict("os.environ", {"LLM_API_KEY": "sk-test"}):
+            with patch.dict("sys.modules", {"groq": MagicMock()}):
+                with patch("flows.llm_enrichment._runner", return_value=json.dumps(diff)):
+                    result = enrich_recommendations(sample_profile, base_recs, sample_df)
+
+        assert result["columns"]["sal"]["transform_hint"] == diff["columns"]["sal"]["transform_hint"]
+        assert result["columns"]["sal"]["type"] == "float"
+
+    def test_transform_hint_only_column_not_dropped(self, sample_profile, base_recs, sample_df):
+        """A column with only transform_hint + note must NOT be dropped by the substantive key filter."""
+        diff = {
+            "columns": {
+                "dept_cd": {
+                    "transform_hint": "normalise abbreviated codes like 'FIN', 'MGT' to full names",
+                    "note": "Department codes are opaque — expand to readable names.",
+                }
+            }
+        }
+        with patch.dict("os.environ", {"LLM_API_KEY": "sk-test"}):
+            with patch.dict("sys.modules", {"groq": MagicMock()}):
+                with patch("flows.llm_enrichment._runner", return_value=json.dumps(diff)):
+                    result = enrich_recommendations(sample_profile, base_recs, sample_df)
+
+        assert "transform_hint" in result["columns"]["dept_cd"]
+        assert result["columns"]["dept_cd"]["note"] is not None
+
     def test_leave_null_baseline_not_overridden_by_llm(self, sample_profile, sample_df):
         """
         MAR detection sets leave_null in the baseline (Level 1 precedence).
@@ -417,3 +475,128 @@ class TestEnrichRecommendations:
 
         # leave_null must be preserved — LLM override stripped
         assert result["columns"]["sal"]["missing_values"]["strategy"] == "leave_null"
+
+
+# ---------------------------------------------------------------------------
+# _validate_transform_ast and _test_transform (4.8)
+# ---------------------------------------------------------------------------
+
+class TestTransformCodeGeneration:
+
+    # --- _validate_transform_ast ---
+
+    def test_validate_ast_valid_lambda_passes(self):
+        ok, err = _validate_transform_ast(
+            "lambda col: col.str.rstrip('%').astype(float) / 100"
+        )
+        assert ok is True
+        assert err == ""
+
+    def test_validate_ast_rejects_import(self):
+        # 'import os' is a statement; ast.parse(mode='eval') raises SyntaxError
+        ok, err = _validate_transform_ast("import os")
+        assert ok is False
+        assert "SyntaxError" in err
+
+    def test_validate_ast_rejects_forbidden_name(self):
+        ok, err = _validate_transform_ast("lambda col: eval(col)")
+        assert ok is False
+        assert "eval" in err
+
+    def test_validate_ast_rejects_dunder_attr(self):
+        ok, err = _validate_transform_ast("lambda col: col.__class__")
+        assert ok is False
+        assert "__class__" in err
+
+    def test_validate_ast_rejects_multiline(self):
+        # Multiple statements are not a valid single expression
+        ok, err = _validate_transform_ast("x = 1\nlambda col: col")
+        assert ok is False
+
+    # --- _test_transform ---
+
+    def test_test_transform_valid_strip_percent(self):
+        s = pd.Series(["10%", "20%", "30%"])
+        ok, err = _test_transform("lambda col: col.str.rstrip('%').astype(float)", s)
+        assert ok is True
+        assert err == ""
+
+    def test_test_transform_fails_on_exception(self):
+        s = pd.Series(["a", "b", "c"])
+        ok, err = _test_transform("lambda col: col.astype(int)", s)
+        assert ok is False
+
+    def test_test_transform_fails_on_excess_nulls(self):
+        # lambda that nullifies all 10 non-null values — 100% > 5% threshold
+        s = pd.Series(["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"])
+        ok, err = _test_transform("lambda col: col.where(col == 'NEVERMATCHES')", s)
+        assert ok is False
+        assert "null" in err.lower()
+
+    def test_test_transform_fails_when_nulls_filled(self):
+        """
+        .astype(str) converts NaN → 'None' string, filling original null positions.
+        This must be rejected even though result_nulls < original_nulls (passes old damage check).
+        """
+        s = pd.Series(["10%", None, "30%", None])
+        ok, err = _test_transform("lambda col: col.str.rstrip('%').astype(str)", s)
+        assert ok is False
+        assert "null" in err.lower()
+
+    def test_test_transform_fails_on_wrong_return_type(self):
+        s = pd.Series([1, 2, 3])
+        ok, err = _test_transform("lambda col: 42", s)
+        assert ok is False
+        assert "Series" in err
+
+    # --- generate_transform_code ---
+
+    def test_generate_no_api_key_returns_unchanged(self, base_recs, sample_df):
+        with patch.dict("os.environ", {"LLM_API_KEY": ""}):
+            result = generate_transform_code(base_recs, sample_df)
+        assert result is base_recs
+
+    def test_generate_stores_transform_code_on_success(self):
+        """LLM returns a valid lambda; generate_transform_code stores it as transform_code."""
+        recs = {
+            "columns": {
+                "price": {
+                    "type": "float",
+                    "transform_hint": "strip '%' suffix and divide by 100",
+                }
+            }
+        }
+        df = pd.DataFrame({"price": ["10%", "20%", "30%"]})
+        groq_mock = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "lambda col: col.str.rstrip('%').astype(float) / 100"
+        groq_mock.Groq.return_value.chat.completions.create.return_value.choices = [mock_choice]
+
+        with patch.dict("os.environ", {"LLM_API_KEY": "sk-test"}):
+            with patch.dict("sys.modules", {"groq": groq_mock}):
+                result = generate_transform_code(recs, df)
+
+        assert "transform_code" in result["columns"]["price"]
+
+    def test_generate_all_retries_fail_skips_column(self):
+        """If all 3 LLM attempts produce code that fails validation, column is skipped."""
+        recs = {
+            "columns": {
+                "price": {
+                    "type": "float",
+                    "transform_hint": "strip '%' suffix and divide by 100",
+                }
+            }
+        }
+        df = pd.DataFrame({"price": ["10%", "20%", "30%"]})
+        groq_mock = MagicMock()
+        mock_choice = MagicMock()
+        # eval is a forbidden name — AST validation will reject this every time
+        mock_choice.message.content = "lambda col: eval(col)"
+        groq_mock.Groq.return_value.chat.completions.create.return_value.choices = [mock_choice]
+
+        with patch.dict("os.environ", {"LLM_API_KEY": "sk-test"}):
+            with patch.dict("sys.modules", {"groq": groq_mock}):
+                result = generate_transform_code(recs, df)
+
+        assert "transform_code" not in result["columns"]["price"]

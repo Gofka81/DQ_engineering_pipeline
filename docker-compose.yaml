@@ -47,6 +47,7 @@ services:
       - minio
     volumes:
       - ./prefect:/prefect
+      - ./logs:/logs
     env_file:
       - .env
     environment:
@@ -97,6 +98,16 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+    ports:
+      - "3000:80"
+    depends_on:
+      - postgres-prefect
 
 volumes:
   postgres-data:

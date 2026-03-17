@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -32,6 +32,8 @@ class ColumnConfig(BaseModel):
     note: str | None = None
     rename_to: str | None = None
     sentinel_values: list[float] | None = None
+    transform_hint: str | None = None
+    transform_code: str | None = None
 
     @field_validator("rename_to")
     @classmethod
@@ -56,6 +58,7 @@ class OutliersConfig(BaseModel):
     method: Literal["iqr"] = "iqr"
     lower: float | None = None
     upper: float | None = None
+    count: int | None = None
 
 
 class RecommendationsSchema(BaseModel):
@@ -111,8 +114,17 @@ class RunOut(BaseModel):
     created_at: datetime
     completed_at: datetime | None = None
     error_message: str | None = None
+    storage_expired: bool = False
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def compute_storage_expired(self) -> "RunOut":
+        if self.status == RunStatus.COMPLETED and self.created_at:
+            # asyncpg returns TIMESTAMPTZ as tz-aware datetime; make now() match
+            now = datetime.now(self.created_at.tzinfo or timezone.utc)
+            self.storage_expired = now > self.created_at + timedelta(days=14)
+        return self
 
 
 class RunStatusResponse(BaseModel):
@@ -136,6 +148,16 @@ class RecommendationsUpdate(BaseModel):
         ...,
         description="Edited recommendations — validated against the DQ schema",
     )
+
+
+class FileWithLatestRunOut(BaseModel):
+    id: UUID
+    original_filename: str
+    file_size: int
+    uploaded_at: datetime
+    run_id: UUID | None
+    run_status: RunStatus | None
+    run_created_at: datetime | None
 
 
 class DownloadResponse(BaseModel):

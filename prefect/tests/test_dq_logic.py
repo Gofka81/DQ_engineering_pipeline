@@ -893,7 +893,7 @@ class TestBuildRecommendations:
     def test_no_duplicates_entry_when_all_unique(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5], "val": [10, 20, 30, 40, 50]})
         rec = build_recommendations(df, profile_dataframe(df), 100.0)
-        assert rec["duplicates"] == {}
+        assert "duplicates" not in rec
 
     # --- Normalization ---
 
@@ -1109,6 +1109,74 @@ class TestScoreProfileDetailed:
         assert result["validity"] == 70.0
         assert result["consistency"] == 60.0
 
+
+# ===========================================================================
+# apply_recommendations — step 0b (transform_code execution)
+# ===========================================================================
+
+def _bare_recs(columns: dict) -> dict:
+    """Minimal recommendations dict with only the columns provided."""
+    return {"columns": columns, "duplicates": {}, "outliers": {}}
+
+
+class TestApplyTransformCode:
+
+    def test_transform_code_applied_before_schema_cast(self):
+        """
+        Percent strings cleaned by transform_code are then correctly cast to float.
+
+        Without step 0b the cast would silently NaN the "10%" strings.
+        With step 0b the lambda strips "%" first, so the cast succeeds.
+        """
+        df = pd.DataFrame({"price": ["10%", "20%", "30%"]})
+        recs = _bare_recs({
+            "price": {
+                "type": "float",
+                "transform_code": "lambda col: col.str.rstrip('%').astype(float)",
+            }
+        })
+        result = apply_recommendations(df, recs)
+        assert list(result["price"]) == [10.0, 20.0, 30.0]
+
+    def test_transform_code_rollback_on_damage(self):
+        """Transform that nullifies >5% of values is rolled back to the original."""
+        df = pd.DataFrame({"val": ["10", "20", "30", "40", "50",
+                                   "60", "70", "80", "90", "100"]})
+        recs = _bare_recs({
+            "val": {
+                "type": "string",
+                # This lambda returns NaN for every value (100% > 5%) → rollback
+                "transform_code": "lambda col: col.where(col == 'NEVERMATCHES')",
+            }
+        })
+        result = apply_recommendations(df, recs)
+        assert list(result["val"]) == ["10", "20", "30", "40", "50",
+                                       "60", "70", "80", "90", "100"]
+
+    def test_transform_code_rollback_on_exception(self):
+        """Transform that raises an exception is rolled back to the original."""
+        df = pd.DataFrame({"val": ["a", "b", "c"]})
+        recs = _bare_recs({
+            "val": {
+                "type": "string",
+                "transform_code": "lambda col: col.astype(int)",  # raises ValueError
+            }
+        })
+        result = apply_recommendations(df, recs)
+        assert list(result["val"]) == ["a", "b", "c"]
+
+    def test_no_transform_code_column_unchanged(self):
+        """Column with transform_hint but no transform_code is left untouched."""
+        df = pd.DataFrame({"val": ["10%", "20%", "30%"]})
+        recs = _bare_recs({
+            "val": {
+                "type": "string",
+                "transform_hint": "strip percent suffix",
+                # No transform_code key — step 0b skips this column
+            }
+        })
+        result = apply_recommendations(df, recs)
+        assert list(result["val"]) == ["10%", "20%", "30%"]
 
 # ===========================================================================
 # apply_recommendations

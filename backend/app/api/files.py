@@ -1,9 +1,15 @@
+import asyncio
+import json
 import uuid
 from io import BytesIO
+from typing import Optional
 from uuid import UUID
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import select
+from fastapi.responses import StreamingResponse
+from jose import JWTError, jwt
+from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
@@ -11,12 +17,13 @@ from backend.app.core.minio_service import MinioService, get_minio_service
 from backend.app.core.redis_service import RedisService, get_redis_service
 from backend.app.db.engine import get_db
 from backend.app.db.models import File as FileModel, Run, RunStatus
-from backend.app.dependencies import get_current_active_user
+from backend.app.dependencies import get_current_active_user, get_user_by_username
 from backend.app.schemas.auth import UserOut
 from backend.app.schemas.file import (
     DownloadResponse,
     FileOut,
     FileUploadResponse,
+    FileWithLatestRunOut,
     RecommendationsOut,
     RecommendationsUpdate,
     RunOut,
@@ -95,7 +102,7 @@ async def upload_file(
     await db.flush()  # Get the file ID
 
     # Create initial run
-    db_run = Run(
+    db_run = un(
         file_id=db_file.id,
         status=RunStatus.PENDING,
     )
@@ -145,6 +152,44 @@ async def list_files(
     )
     files = result.scalars().all()
     return files
+
+
+@router.get("/with-latest-run", response_model=list[FileWithLatestRunOut])
+async def list_files_with_latest_run(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    runs_lateral = (
+        select(
+            Run.id.label("run_id"),
+            Run.status.label("run_status"),
+            Run.created_at.label("run_created_at"),
+        )
+        .where(Run.file_id == FileModel.id)
+        .order_by(Run.created_at.desc())
+        .limit(1)
+        .lateral("latest_run")
+    )
+    stmt = (
+        select(
+            FileModel.id,
+            FileModel.original_filename,
+            FileModel.file_size,
+            FileModel.uploaded_at,
+            runs_lateral.c.run_id,
+            runs_lateral.c.run_status,
+            runs_lateral.c.run_created_at,
+        )
+        .where(FileModel.user_id == current_user.id)
+        .outerjoin(runs_lateral, true())
+        .order_by(FileModel.uploaded_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return [FileWithLatestRunOut(**row) for row in result.mappings().all()]
 
 
 @router.get("/{file_id}", response_model=FileOut)
@@ -373,6 +418,96 @@ async def list_runs(
     )
     runs = result.scalars().all()
     return runs
+
+
+@router.get("/{file_id}/events")
+async def stream_run_events(
+    file_id: UUID,
+    token: str = Query(..., description="JWT token (EventSource cannot set headers)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    SSE stream for live run status updates.
+    Accepts JWT as ?token= query param because EventSource doesn't support headers.
+    Sends current state immediately on connect, then streams Redis Pub/Sub messages.
+    """
+    # --- Auth via query param ---
+    credentials_exception = HTTPException(status_code=401, detail="Invalid token")
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY.get_secret_value(),
+            algorithms=[settings.ALGORITHM],
+        )
+        username: Optional[str] = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = await get_user_by_username(db, username)
+    if not user or user.disabled:
+        raise credentials_exception
+
+    # --- Verify file ownership ---
+    file_result = await db.execute(
+        select(FileModel).where(FileModel.id == file_id, FileModel.user_id == user.id)
+    )
+    if not file_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # --- Get latest run ---
+    run_result = await db.execute(
+        select(Run).where(Run.file_id == file_id).order_by(Run.created_at.desc()).limit(1)
+    )
+    run = run_result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="No runs found for this file")
+
+    run_id = str(run.id)
+    initial_payload = {
+        "status": run.status.value if hasattr(run.status, "value") else str(run.status),
+        "dq_scores_before": run.dq_scores_before,
+        "dq_scores_after": run.dq_scores_after,
+        "error_message": run.error_message,
+    }
+
+    async def event_generator():
+        # Send current state immediately (cold-start / reconnect recovery)
+        yield f"data: {json.dumps(initial_payload)}\n\n"
+
+        # If already in a terminal state, no need to subscribe
+        terminal = {"COMPLETED", "FAILED"}
+        current_status = initial_payload["status"]
+        if current_status in terminal:
+            return
+
+        # Subscribe to Redis Pub/Sub for live updates
+        r = aioredis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT)
+        try:
+            async with r.pubsub() as ps:
+                await ps.subscribe(f"run:{run_id}:status")
+                async for msg in ps.listen():
+                    if msg["type"] == "message":
+                        data = msg["data"]
+                        if isinstance(data, bytes):
+                            data = data.decode()
+                        yield f"data: {data}\n\n"
+                        # Close stream once terminal state reached
+                        try:
+                            parsed = json.loads(data)
+                            if parsed.get("status") in terminal:
+                                return
+                        except Exception:
+                            pass
+        finally:
+            await r.aclose()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # Runs endpoints

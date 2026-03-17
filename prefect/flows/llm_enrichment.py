@@ -31,7 +31,7 @@ explicit default, not missing information.
 Before deciding on each column, briefly reason about its semantics:
 - ID/key columns (high cardinality, names like *_id, *_key, *_code) — drop_row for nulls, never impute
 - Pattern columns (email, phone, UUID, URL) — values cannot be invented or imputed; never use fill/mode/mean; choose drop_row if the row is useless without this field, leave_null if the row is still useful (e.g. a CRM contact without a phone number is still a valid contact)
-- Abbreviated/cryptic column names (e.g. sal, dept_cd, emp_no) — add rename_to with clearer name
+- Abbreviated column names — scan EVERY column for abbreviated tokens and add rename_to to ALL of them; do not skip any, even when also making other changes to that column
 - High-null event-date or optional-attribute columns (adv_evt_dt, incident_dt, resolved_at, notes) — nulls are by design → prefer leave_null
 - Sample rows: spot sentinel strings ("N/A", "unknown", "none") — these are validity issues tracked in invalid count, NOT nulls; always verify null_pct > 0 before recommending any missing_values strategy
 
@@ -44,7 +44,8 @@ are improving. Within each column include only the keys you are changing.
       "type": "int|float|string|date|bool",            (optional — only if changing)
       "missing_values": {{"strategy": "median|mean|mode|fill|drop_row|drop_column|leave_null", "value": null}} or null,  (optional — only if changing)
       "rename_to": "clearer_name",                      (optional — only for abbreviated/cryptic names)
-      "note": "one sentence explaining the change"      (required for every column you include)
+      "transform_hint": "imperative action sentence citing actual values",   (optional — only when sample rows show a concrete value-level issue)
+      "note": "one sentence explaining the semantic reasoning"               (required for every column you include)
     }}
   }}
 }}
@@ -58,10 +59,10 @@ Rules:
 - strategy "fill" requires "value" to be non-null
 - leave_null: use when nulls are intentional — appropriate for event-date or optional-attribute columns where null means "not applicable"
 - drop_column: use only when a column is >50% missing AND the column has no domain significance
-- rename_to: when the column name would be clearer based on the actual data values in sample rows (e.g. a column "name" containing "John Smith" could be "full_name"; "sal" → "salary"; "dept_cd" → "department_code"); do NOT change _id columns to _number — identifiers and numbers are different concepts
+- rename_to: scan ALL columns for abbreviated names — the column name alone determines this (no sample rows needed); adding rename_to is mandatory for every abbreviated column, not optional; rename_to + note alone is a valid complete entry. Suffix expansions are unambiguous and must always be applied: _cd→_code, _nm→_name, _dt→_date, _ts→_timestamp, _pct→_percent, _amt→_amount, _qty→_quantity, _flg→_flag, _src→_source, _typ→_type, _stg→_stage, _scr→_score, _pt→_point, _mgr→_manager, _num→_number, _val→_value, _yrs→_years, _cnt→_count, _mthd→_method, _prot→_protocol, _cat→_category. For abbreviated prefixes (e.g. txn_, ord_, acct_, cmpny_) use your domain knowledge to expand them to full words and combine with the suffix expansion. Never rename _id or _key suffix columns. Leave well-known domain acronyms unchanged: bmi, sku, uuid, url, api, sql.
 - missing_values: only recommend if null_pct > 0 — sentinel strings like "N/A" or "unknown" in sample rows are validity issues (tracked in invalid count), not nulls; never add missing_values for a column with null_pct = 0
-- format inconsistency: if a column's warnings mention "mixed value formats" or "not numeric-castable", do NOT change its type — instead add an entry to custom_transforms describing the normalization needed (e.g. "strip % suffix and divide by 100"); type casts are for true type mismatches only, not format normalization
-- note is required for every column you include, but do NOT include a column solely to add a note — a note is only valid when you are also changing type, missing_values, or rename_to
+- transform_hint: only valid for string-type columns — numeric, date, and bool columns are already correctly typed so there is no string formatting to fix; numeric range anomalies are handled by the outliers section. For string columns, add when sample rows show a concrete per-cell value-level issue that type-casting alone cannot fix. Two conditions must BOTH be true: (1) evidence is visible in the sample rows — cite the actual values you see, (2) the fix is a per-cell operation (regex, arithmetic, string split) that does not require knowing other rows. Write a single imperative sentence. Examples: "strip '%%' suffix from values like '12%%', '0.5%%' and divide by 100"; "extract numeric part from '180cm', '5ft9in' and convert all to cm"; "strip non-numeric characters from '~50', '100 approx' and cast to float"; "split 'New York, NY' pattern on ', ' into city and state".
+- note is required for every column you include, but do NOT include a column solely to add a note — a note is only valid when you are also changing type, missing_values, rename_to, or transform_hint
 - Output ONLY the JSON object — no markdown fences, no commentary\
 """
 
@@ -340,6 +341,11 @@ def _runner(
 
     # Budget ~30 tokens per column for the diff JSON, minimum 512, cap at 2048.
     max_tokens = min(512 + len(base_recs.get("columns", {})) * 30, 2048)
+    logger.info(
+        "LLM enrichment request | model=%s max_tokens=%d attempt=%d prompt_chars=%d",
+        _MODEL, max_tokens, attempt + 1, len(user_content),
+    )
+    t0 = time.time()
     response = client.chat.completions.create(
         model=_MODEL,
         max_tokens=max_tokens,
@@ -349,7 +355,16 @@ def _runner(
             {"role": "user", "content": user_content},
         ],
     )
+    elapsed = time.time() - t0
     raw = response.choices[0].message.content.strip()
+    usage = response.usage
+    logger.info(
+        "LLM enrichment response | attempt=%d elapsed=%.2fs tokens_in=%d tokens_out=%d",
+        attempt + 1, elapsed,
+        usage.prompt_tokens if usage else -1,
+        usage.completion_tokens if usage else -1,
+    )
+    logger.info("LLM enrichment raw output attempt=%d:\n%s", attempt + 1, raw)
     logger.debug("LLM_RESPONSE attempt=%d\n%s", attempt + 1, raw)
     return raw
 
@@ -429,6 +444,13 @@ def validate_llm_output(data: dict[str, Any], known_columns: set[str]) -> tuple[
                 errors.append(
                     f"columns['{col}'].rename_to='{rt}' is not a valid identifier "
                     f"(use snake_case, no spaces or hyphens)"
+                )
+
+        if "transform_hint" in col_def:
+            th = col_def["transform_hint"]
+            if not isinstance(th, str) or not th.strip():
+                errors.append(
+                    f"columns['{col}'].transform_hint must be a non-empty string"
                 )
 
     if errors:
@@ -558,7 +580,8 @@ def enrich_recommendations(
 
         # Drop columns where only a note remains (note without a real change is noise)
         # and columns where nothing changed at all.
-        _SUBSTANTIVE_KEYS = {"type", "nullable", "missing_values", "rename_to"}
+        # transform_hint is substantive — a column with only transform_hint + note is kept.
+        _SUBSTANTIVE_KEYS = {"type", "nullable", "missing_values", "rename_to", "transform_hint"}
         llm_diff["columns"] = {
             col: col_diff
             for col, col_diff in llm_diff["columns"].items()
@@ -576,12 +599,309 @@ def enrich_recommendations(
                     enriched["columns"][col]["warnings"] = []
 
         n_changed = len(llm_diff["columns"])
-        n_notes = sum(1 for cd in llm_diff["columns"].values() if cd.get("note"))
         logger.info(
             f"LLM enrichment succeeded on attempt {attempt + 1}. "
-            f"columns_changed={n_changed} column_notes={n_notes}"
+            f"columns_changed={n_changed}"
         )
+
+        # Log each override so it's easy to see what the LLM actually changed.
+        # Format: col | key: <before> → <after>
+        # For missing_values we show the strategy string, not the full dict.
+        for col, col_diff in llm_diff["columns"].items():
+            base_col = base_recommendations["columns"].get(col, {})
+            changes = []
+            for key, after in col_diff.items():
+                if key == "note":
+                    continue
+                before = base_col.get(key)
+                if key == "missing_values":
+                    before = (before or {}).get("strategy")
+                    after  = (after  or {}).get("strategy") if isinstance(after, dict) else after
+                changes.append(f"{key}: {before!r} → {after!r}")
+            if changes:
+                logger.info("LLM override | %s | %s", col, " | ".join(changes))
+
         return enriched
 
     logger.error("LLM enrichment: all 3 attempts exhausted — falling back to baseline recommendations")
     return base_recommendations
+
+
+# ---------------------------------------------------------------------------
+# Custom transform code generation (4.8)
+# ---------------------------------------------------------------------------
+
+_TRANSFORM_SYSTEM = """\
+You are a pandas data transformation expert. Given a column name, target type, \
+sample values, and a plain-English transform description, output ONLY a Python \
+lambda expression — nothing else.
+
+Format: lambda col: <pandas Series expression>
+
+Rules:
+- Only use pandas Series methods and arithmetic operators
+- No imports, no multi-line statements, no eval/exec/open
+- No access to dunder attributes (__class__, __dict__, etc.)
+- The input `col` is a pandas Series; return a pandas Series
+- The result Series must have the same length as the input
+
+Example:
+  Column: price, type: float, hint: strip '%' suffix and divide by 100
+  Output: lambda col: col.str.rstrip('%').astype(float) / 100
+
+Output ONLY the lambda expression — no markdown, no commentary, no explanation.\
+"""
+
+_FORBIDDEN_NAMES = frozenset({
+    "eval", "exec", "open", "__import__", "compile", "globals", "locals",
+    "getattr", "setattr", "delattr", "vars", "dir", "type", "input",
+    "print", "os", "sys", "subprocess",
+})
+
+
+def _validate_transform_ast(code: str) -> tuple[bool, str]:
+    """
+    Static safety check for a transform lambda string.
+
+    Rejects:
+    - Code that doesn't parse as a single expression (mode='eval')
+    - Import statements (ast.Import / ast.ImportFrom nodes)
+    - Calls to forbidden builtins (eval, exec, open, __import__, etc.)
+    - Dunder attribute access (__class__, __dict__, etc.)
+
+    Returns (True, "") on success or (False, reason) on failure.
+    """
+    try:
+        tree = ast.parse(code, mode="eval")
+    except SyntaxError as e:
+        return False, f"SyntaxError: {e}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return False, "Import statements not allowed in transform lambda"
+        if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
+            return False, f"Forbidden name: '{node.id}'"
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            return False, f"Dunder attribute access not allowed: '{node.attr}'"
+
+    return True, ""
+
+
+_TRANSFORM_TEST_GLOBALS = {
+    "__builtins__": {},
+    "pd": pd, "re": re,
+    "str": str, "int": int, "float": float,
+    "len": len, "abs": abs, "round": round, "min": min, "max": max,
+}
+
+
+def _test_transform(code: str, series: pd.Series) -> tuple[bool, str]:
+    """
+    Execute a transform lambda against a real Series and check for damage.
+
+    Stages (each logged at DEBUG):
+      1. compile  — ast.parse + compile to bytecode
+      2. execute  — call fn(series)
+      3. type     — result must be pd.Series
+      4. length   — result must have same row count as input
+      5. damage   — new NaN rate ≤ 5% of original non-null values
+      6. nulls    — original null positions must remain null (catches NaN → "None" string)
+      7. ok       — all checks passed
+
+    Returns (True, "") on success or (False, reason) on failure — never raises.
+    """
+    n_rows = len(series)
+    n_nonnull = int(series.notna().sum())
+    logger.debug("_test_transform | compile  | rows=%d non-null=%d | %s", n_rows, n_nonnull, code)
+
+    try:
+        fn = eval(
+            compile(ast.parse(code, mode="eval"), "<transform>", "eval"),
+            _TRANSFORM_TEST_GLOBALS,
+        )
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        logger.debug("_test_transform | compile  | FAIL | %s", reason)
+        return False, reason
+
+    logger.debug("_test_transform | execute  | calling fn(series)")
+    try:
+        result = fn(series)
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        logger.debug("_test_transform | execute  | FAIL | %s", reason)
+        return False, reason
+
+    logger.debug("_test_transform | type     | got %s", type(result).__name__)
+    if not isinstance(result, pd.Series):
+        reason = f"Result must be pd.Series, got {type(result).__name__}"
+        logger.debug("_test_transform | type     | FAIL | %s", reason)
+        return False, reason
+
+    logger.debug("_test_transform | length   | expected=%d got=%d", n_rows, len(result))
+    if len(result) != n_rows:
+        reason = f"Length mismatch: expected {n_rows}, got {len(result)}"
+        logger.debug("_test_transform | length   | FAIL | %s", reason)
+        return False, reason
+
+    original_nulls = series.isna().sum()
+    new_null_increase = (result.isna().sum() - original_nulls) / max(n_nonnull, 1)
+    logger.debug(
+        "_test_transform | damage   | original_nulls=%d result_nulls=%d new_null_rate=%.2f%%",
+        original_nulls, result.isna().sum(), new_null_increase * 100,
+    )
+    if new_null_increase > 0.05:
+        reason = f"Excess new nulls: {new_null_increase:.2%} of non-null values became null"
+        logger.debug("_test_transform | damage   | FAIL | %s", reason)
+        return False, reason
+
+    original_null_mask = series.isna()
+    if original_null_mask.any():
+        n_corrupted = int((~result[original_null_mask].isna()).sum())
+        logger.debug(
+            "_test_transform | nulls    | original null positions filled: %d", n_corrupted,
+        )
+        if n_corrupted > 0:
+            reason = f"Transform filled {n_corrupted} original null(s) — null positions must be preserved (hint: avoid .astype(str) which converts NaN → 'None')"
+            logger.debug("_test_transform | nulls    | FAIL | %s", reason)
+            return False, reason
+
+    logger.debug("_test_transform | ok       | result non-null=%d", int(result.notna().sum()))
+    return True, ""
+
+
+def generate_transform_code(
+    recommendations: dict[str, Any],
+    df: pd.DataFrame,
+) -> dict[str, Any]:
+    """
+    For each column with a transform_hint, call the LLM to generate a validated
+    pandas lambda, then store it as transform_code in the column dict.
+
+    Soft-fail contract — never raises. Returns recommendations unchanged if:
+    - LLM_API_KEY is not set
+    - groq package is not installed
+    - All 3 attempts fail for a column (that column is skipped silently)
+
+    transform_code is generated at transform time and never persisted to DB.
+    The user reviews transform_hint; the generated lambda is an implementation detail.
+    """
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    if not api_key:
+        logger.warning("LLM_API_KEY not set — skipping custom transform generation")
+        return recommendations
+
+    try:
+        from groq import Groq
+    except ImportError:
+        logger.warning("groq package not installed — skipping custom transform generation")
+        return recommendations
+
+    client = Groq(api_key=api_key)
+    recs = copy.deepcopy(recommendations)
+
+    for col, col_def in recs.get("columns", {}).items():
+        transform_hint = col_def.get("transform_hint")
+        if not transform_hint:
+            continue
+        if col not in df.columns:
+            continue
+
+        sample = df[col].dropna().head(10).tolist()
+        target_type = col_def.get("type", "string")
+        previous_code = ""
+        previous_error = ""
+
+        for attempt in range(3):
+            if attempt == 0:
+                user_content = (
+                    f"Column: {col}\n"
+                    f"Target type: {target_type}\n"
+                    f"Sample values: {sample}\n"
+                    f"Transform: {transform_hint}"
+                )
+            else:
+                user_content = (
+                    f"Column: {col}\n"
+                    f"Target type: {target_type}\n"
+                    f"Sample values: {sample}\n"
+                    f"Transform: {transform_hint}\n\n"
+                    f"Your previous attempt:\n{previous_code}\n\n"
+                    f"Error:\n{previous_error}\n\n"
+                    f"Fix the error and return only the corrected lambda."
+                )
+
+            logger.info(
+                "Transform LLM request | col=%s attempt=%d/3 hint=%r",
+                col, attempt + 1, transform_hint,
+            )
+            logger.debug("Transform LLM user prompt | col=%s:\n%s", col, user_content)
+            try:
+                t0 = time.time()
+                response = client.chat.completions.create(
+                    model=_MODEL,
+                    max_tokens=128,
+                    temperature=0,
+                    messages=[
+                        {"role": "system", "content": _TRANSFORM_SYSTEM},
+                        {"role": "user", "content": user_content},
+                    ],
+                )
+                elapsed = time.time() - t0
+                raw = response.choices[0].message.content.strip()
+                usage = response.usage
+                logger.info(
+                    "Transform LLM response | col=%s attempt=%d elapsed=%.2fs tokens_in=%d tokens_out=%d | %s",
+                    col, attempt + 1, elapsed,
+                    usage.prompt_tokens if usage else -1,
+                    usage.completion_tokens if usage else -1,
+                    raw,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Transform code gen attempt %d/3 for '%s' raised: %s",
+                    attempt + 1, col, e,
+                )
+                previous_code = ""
+                previous_error = str(e)
+                continue
+
+            # Strip markdown fences if present
+            code = raw
+            if code.startswith("```"):
+                lines = code.splitlines()
+                lines = lines[1:] if lines else lines
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                code = "\n".join(lines).strip()
+
+            logger.info("Transform code | %s | attempt %d | %s", col, attempt + 1, code)
+
+            valid, err = _validate_transform_ast(code)
+            if not valid:
+                logger.warning(
+                    "Transform code for '%s' failed AST validation (attempt %d): %s",
+                    col, attempt + 1, err,
+                )
+                previous_code = code
+                previous_error = f"AST validation failed: {err}"
+                continue
+
+            ok, err = _test_transform(code, df[col].head(200))
+            if not ok:
+                logger.warning(
+                    "Transform code for '%s' failed execution test (attempt %d): %s",
+                    col, attempt + 1, err,
+                )
+                previous_code = code
+                previous_error = f"Execution test failed: {err}"
+                continue
+
+            col_def["transform_code"] = code
+            break
+        else:
+            logger.warning(
+                "Transform code gen for '%s': all 3 attempts failed — skipping", col,
+            )
+
+    return recs
