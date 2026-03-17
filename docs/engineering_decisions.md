@@ -45,6 +45,27 @@ This document captures every significant architectural and technical decision ma
 37. [DQ Framework — DAMA DMBOK Dimensions + MCAR/MAR/MNAR for Completeness](#37-dq-framework--dama-dmbok-dimensions--mcarmarmnar-for-completeness)
 38. [Code vs LLM Boundary — Revised After Research](#38-code-vs-llm-boundary--revised-after-research)
 39. [Standard Alignment — Honest Scope Assessment](#39-standard-alignment--honest-scope-assessment)
+40. [Formal MAR Detection — scipy Point-Biserial + Chi-Square](#40-formal-mar-detection--scipy-point-biserial--chi-square)
+41. [Numeric Sentinel Detection — 3×IQR Fence + Absolute Count ≥5](#41-numeric-sentinel-detection--3iqr-fence--absolute-count-5)
+42. [Z-Score vs Min-Max Normalization — Selected by Outlier Presence](#42-z-score-vs-min-max-normalization--selected-by-outlier-presence)
+43. [Lean Baseline for LLM — Strip Default Fields Before Sending](#43-lean-baseline-for-llm--strip-default-fields-before-sending)
+44. [Format Inconsistency Detection — Partial Castability, Not Regex Patterns](#44-format-inconsistency-detection--partial-castability-not-regex-patterns)
+45. [Type Cast Guard — Skip Unsafe Casts, Don't Silently Corrupt](#45-type-cast-guard--skip-unsafe-casts-dont-silently-corrupt)
+46. [Frontend Stack — React + Vite + TypeScript + Tailwind CSS v4](#46-frontend-stack--react--vite--typescript--tailwind-css-v4)
+47. [Sidebar Layout — Run ID as Primary Identifier](#47-sidebar-layout--run-id-as-primary-identifier)
+48. [SSE Authentication — JWT via Query Parameter](#48-sse-authentication--jwt-via-query-parameter)
+49. [SSE Reconnect Prevention After Terminal State](#49-sse-reconnect-prevention-after-terminal-state)
+50. [Active Run State — sessionStorage Persistence](#50-active-run-state--sessionstorage-persistence)
+51. [Recommendation Diff — Client-Side Pure Function](#51-recommendation-diff--client-side-pure-function)
+52. [Dark Mode — Tailwind v4 Class Strategy with localStorage Persistence](#52-dark-mode--tailwind-v4-class-strategy-with-localstorage-persistence)
+53. [Pydantic Silent Field Stripping — transform_hint and transform_code](#53-pydantic-silent-field-stripping--transform_hint-and-transform_code)
+54. [After-Transform Issue Counts — Strategy-Based Outlier Counting](#54-after-transform-issue-counts--strategy-based-outlier-counting)
+55. [Per-Run File Logging — Named Logger + Shared File Handler](#55-per-run-file-logging--named-logger--shared-file-handler)
+56. [LLM Call Audit Logging — Timing and Token Counts](#56-llm-call-audit-logging--timing-and-token-counts)
+57. [generate_missing_transform_codes — LLM 2 in Transform Flow](#57-generate_missing_transform_codes--llm-2-in-transform-flow)
+58. [Download Button Placement — RunHeader, Not COMPLETED Card](#58-download-button-placement--runheader-not-completed-card)
+59. [AWAITING_REVIEW UI — Issues Bar, Rename Checkboxes, Expandable Column Rows](#59-awaiting_review-ui--issues-bar-rename-checkboxes-expandable-column-rows)
+60. [MinIO Object Lifecycle Policies — Raw and Curated Buckets](#60-minio-object-lifecycle-policies--raw-and-curated-buckets)
 
 ---
 
@@ -941,7 +962,7 @@ Earlier documentation cited "ISO 8000 alignment" — this was inaccurate and has
 | Dimension | Maps to | Actual scope (what the pipeline checks) |
 |---|---|---|
 | Completeness | Missing values section | Null ratio at value level. Does not check population or column-schema completeness. |
-| Validity | Sentinel detection, type recast, outlier treatment | Type mismatches on `object`-dtype columns only. Native `int`/`float` are not range-validated. Numeric sentinels (`-999`) not detected. |
+| Validity | Sentinel detection, type recast, outlier treatment | Type mismatches on `object`-dtype columns only. Native `int`/`float` are not range-validated. String and numeric sentinels both detected. Format inconsistency detected via partial castability. |
 | Uniqueness | Duplicate handling | Exact row duplicates only. No fuzzy/near-duplicate matching. |
 | Consistency | Type recast, date standardisation | Within-column format patterns only. Cross-column rule validation is a known gap. |
 | Accuracy | (none) | Requires ground truth — out of scope |
@@ -1019,7 +1040,7 @@ In the thesis, frame the project as:
 Avoid claiming ISO 8000 or full ISO/IEC 25012 alignment. Cite ISO/IEC 25012 as a related standard for academic context, not as the operative framework.
 
 **On over-engineering:**
-- **MCAR/MAR/MNAR framework:** Borrowed from clinical research (van Buuren 2018). This is academically justified for the thesis and the MAR detection in code (`_correlated_nulls()`) is correct and generalisable. Accept it, but acknowledge in the thesis that this level of missing-data taxonomy is unusual for business CSV DQ.
+- **MCAR/MAR/MNAR framework:** Borrowed from clinical research (van Buuren 2018). This is academically justified for the thesis and the MAR detection in code (`_detect_mar_columns()`) is correct and generalisable. Accept it, but acknowledge in the thesis that this level of missing-data taxonomy is unusual for business CSV DQ.
 - **LLM for MNAR detection:** MNAR is handled via a single prompt instruction: high-null event-related columns (`adv_evt_dt`, `incident_dt`, `resolved_at`) should use `leave_null` instead of `drop_column`. This is not a distinct code path — it is one bullet in `_RUNNER_SYSTEM`. No specific MNAR test failures have been recorded; the reliability concern is theoretical (probabilistic LLM instructions). What *was* tested and failed was MAR detection via the LLM — that was moved to code. MNAR remains as LLM reasoning, untested in isolation.
 
 **On under-engineering:**
@@ -1027,3 +1048,416 @@ Avoid claiming ISO 8000 or full ISO/IEC 25012 alignment. Cite ISO/IEC 25012 as a
 - **Validity nearly decorative for numeric data:** This is a known gap (todo item) — validity should check native numeric types for range violations. In the current implementation, validity's 25% weight in the DQ score barely captures real validity problems.
 - **Before/after comparison not actionable:** The score comparison shows a number changed, but does not tell the user *which recommendation* had the most impact. This is a UX gap that could be addressed with a per-dimension diff, but is acceptable for a research prototype.
 - **No user configurability:** Thresholds (50% null for drop_column, IQR 1.5×, cardinality 10%, 80% MAR correlation) are hardcoded. For a research prototype, this is appropriate. A production tool would expose these as user-configurable parameters.
+
+---
+
+## 40. Formal MAR Detection — scipy Point-Biserial + Chi-Square
+
+**Decision:** Implement MAR detection in `_detect_mar_columns()` using formal scipy statistical tests rather than a simple count-based correlation check.
+
+**Context:** The original design described MAR detection as checking "whether ≥80% of nulls in column A appear when column B = value V". This is a simple heuristic that works on toy examples but fails on real data with multiple correlated values or continuous distributions.
+
+**Implementation:**
+- Create a binary missingness indicator: `missing_flag = col.isna().astype(int)`
+- For numeric other-columns: **point-biserial correlation** between `missing_flag` and the numeric values (`scipy.stats.pointbiserialr`) — tests whether the numeric values are systematically different when the target column is null
+- For categorical other-columns: **chi-square test** of independence (`scipy.stats.chi2_contingency`) on a 2×k contingency table (missing/present vs each category)
+- α = 0.05 significance threshold — if p-value < 0.05, MAR is detected, `leave_null` is applied
+
+**Why formal tests over the 80% heuristic:**
+- The 80% threshold was calibrated on one example (ATM transactions). With a different dataset, 80% could be too high (misses real MAR) or too low (false positive on coincidental clustering).
+- Statistical hypothesis testing with p < 0.05 is a defensible, reproducible threshold with an established meaning in the literature.
+- The result is binary and deterministic: either the null pattern is statistically explained by another column or it is not.
+
+**Trade-off:** scipy adds a dependency. Accepted: scipy is a standard scientific Python library already present in most data engineering environments.
+
+---
+
+## 41. Numeric Sentinel Detection — 3×IQR Fence + Absolute Count ≥5
+
+**Decision:** Detect numeric sentinel values using a 3×IQR fence for extremity and an **absolute count ≥ 5** (not a percentage) as the frequency threshold.
+
+**Context:** The initial implementation used `count / n ≥ 5%` as the frequency threshold. This failed silently on large datasets — 34 occurrences of `-999` in a 1,200-row temperature dataset is 2.8%, below the 5% threshold, meaning the sentinels were not detected even though they clearly represented "not recorded" values.
+
+**Why 3×IQR instead of 1.5×IQR (the standard outlier fence):**
+The standard 1.5×IQR fence is designed to catch all statistical outliers, including genuine rare events (fraud, sensor spikes). Sentinels are a different category — they are *implausibly* extreme, not just unusual. A temperature column with range 15–35°C and a sentinel of `-999` is qualitatively different from a salary column with a 99th-percentile value of `$450,000`. Using 3×IQR makes the fence stricter, catching only values that are structurally impossible given the column's distribution, not just statistically unusual.
+
+**Why absolute count ≥ 5 instead of a percentage:**
+- Percentage threshold silently fails on large datasets (example above: 2.8% of 1,200 rows)
+- Sentinel values are typically data entry codes — if `-999` appears once, it might be a genuine measurement error; if it appears 5+ times, it is almost certainly a code
+- The absolute threshold of 5 is consistent with the `castable_count ≥ 5` floor used in format inconsistency detection — same principle: below 5 occurrences there is not enough signal to make a deterministic claim
+- The same threshold is used in tests: test datasets use 45 normal + 5 sentinel values (5/50 = 10%), keeping sentinels rare enough not to distort Q1/Q3
+
+**Known limitation:** If sentinel values are >~20% of the column, they pull Q1 (or Q3) into the sentinel range, widening the 3×IQR fence until the sentinels fall within it and are no longer detected. This is an inherent limitation of IQR-based methods when the "contamination" rate is high. Addressed in documentation; a future improvement would use a robust estimator (e.g. median absolute deviation) for the fence.
+
+---
+
+## 42. Z-Score vs Min-Max Normalization — Selected by Outlier Presence
+
+**Decision:** The `normalize` field in recommendations is a 3-value choice (`"min_max"`, `"z_score"`, `false`) rather than a boolean. The pipeline automatically selects the method based on the column's outlier profile.
+
+**Context:** The original implementation used `normalize: true/false` and always applied min-max. The boolean was replaced by a string literal after research into the practical difference between the two methods in the presence of outliers.
+
+**Selection logic:**
+```python
+normalize = "z_score" if has_outliers else "min_max"
+```
+where `has_outliers = outlier_info.get("count", 0) > 0`.
+
+**Rationale:**
+- **Min-max** compresses all values to [0, 1] using `(x − min) / (max − min)`. If the column has outliers, `min` and `max` are the outlier values — every non-outlier value is squashed into a tiny range near 0.5. The scaling is dominated by the extremes and loses all resolution for the bulk of the data.
+- **Z-score** uses `(x − mean) / std`. Outliers inflate std, which compresses the distribution less dramatically than min-max. The result is a meaningful spread around 0 for the bulk of the data.
+
+**Z-score implementation:** Uses `ddof=0` (population std, not sample std). This is consistent with scikit-learn's `StandardScaler` default and produces `std=1` rather than a slightly inflated value.
+
+**User override:** The user can change `normalize` in the reviewed JSON — `false` to skip, or swap between `"min_max"` and `"z_score"` based on their use case.
+
+---
+
+## 43. Lean Baseline for LLM — Strip Default Fields Before Sending
+
+**Decision:** `_lean_baseline()` strips all default-value fields from the recommendations JSON before sending it to the LLM. Only non-default information is transmitted.
+
+**Context:** The full recommendations JSON includes many fields that are identical for most columns: `nullable: false`, `missing_values: null`, `normalize: false`, `warnings: []`, `rename_to: null`, `note: null`. Sending these to the LLM adds token cost and prompt noise without providing any information the LLM can act on.
+
+**What is stripped (when at default value):**
+- `nullable: false` — omitted; LLM should not change nullability
+- `missing_values: null` — omitted; no fill needed, LLM has nothing to do here
+- `normalize: false` — omitted; normalization is a code decision
+- `warnings: []` — omitted; empty list carries no information
+- `rename_to: null` — omitted; LLM adds this only when it has a suggestion
+- `note: null` — omitted; LLM adds notes only when it has something to say
+
+**What is always kept:**
+- `type` — LLM's only signal about the column's data type
+- Non-default `nullable: true` — signals nullability relevant for MNAR reasoning
+- Non-default `missing_values` — shows what strategy was chosen; LLM may override (MNAR)
+- Non-default `normalize` — shows normalization was suggested; LLM may note it
+- Non-default `warnings` — shows existing warnings; LLM should not override these
+
+**Format:** `json.dumps(lean_baseline, separators=(",", ":"))` — compact JSON (no spaces, no newline indentation). The diff-only format combined with compact JSON reduces the baseline block from ~600 tokens to ~200 tokens for a typical 10-column dataset.
+
+**System prompt update:** A paragraph was added explaining the sparse format to the LLM: "Fields absent from a column dict are at their default value — `nullable: false`, `missing_values: null`, `normalize: false`. Do not echo default fields back; only include fields you are changing."
+
+---
+
+## 44. Format Inconsistency Detection — Partial Castability, Not Regex Patterns
+
+**Decision:** Detect format inconsistency in string columns by checking how many values partially cast to numeric (`pd.to_numeric(errors="coerce")`), not by matching regex patterns for specific format types.
+
+**Context:** The initial design considered regex-based format pattern detection: identify `currency`, `unit_value`, `percentage`, `integer`, `float` patterns and flag columns that mix patterns. After analysis, this approach was rejected:
+- `unit_value` would match `"7km"`, `"7_000m"`, `"7 km"` and arbitrary suffixes like `"7th"` — far too broad
+- `currency` would only catch USD `$` symbols — missing EUR `€`, GBP `£`, any written currencies
+- A column with a mix of `integer` and `float` (e.g. `"100"` and `"99.5"`) would be flagged as inconsistent when both are valid numeric representations
+
+**Why partial castability instead:**
+The `pd.to_numeric(errors="coerce")` approach is the exact same function used in `apply_recommendations()` for the cast step. So the detection and the application use identical logic — if the profiler detects partial castability, the cast step will encounter the same problem. This is ground truth, not an approximation.
+
+**Detection threshold:**
+- `castable_count ≥ 5` — same absolute-count floor as sentinel detection; below 5 occurrences there is not enough signal
+- `castable_pct < 80%` — the same threshold used in `_detect_column_type()` for deciding whether a column is numeric. Below 80% numeric the column is already typed as `string`; partial castability in the 5–79% range means the column is ambiguous
+
+**Purpose — feeds custom transforms:** Format inconsistency is detected primarily to give the LLM (future custom transform generation) the signal it needs. The `warnings` field surfaces the sample of non-castable values (e.g. `"$1,200"`, `"N/A"`) so the custom transform prompt can propose the correct normalisation.
+
+---
+
+## 45. Type Cast Guard — Skip Unsafe Casts, Don't Silently Corrupt
+
+**Decision:** Before applying any `int` or `float` cast in `apply_recommendations()`, `_would_cast_safely()` simulates the cast and skips it if >5% of non-null values would become `NaN`.
+
+**Context:** An earlier implementation naively applied `pd.to_numeric(errors="coerce")` to any column typed as `int` or `float`. If the column had many string sentinels or mixed formats (e.g. currency symbols, percentage signs), the cast would silently replace a significant fraction of values with `NaN` — worse than the original data because the corruption was invisible.
+
+**Mechanism:**
+```python
+def _would_cast_safely(series, target_type, threshold=0.05):
+    non_null = series.dropna()
+    converted = pd.to_numeric(non_null, errors="coerce")
+    new_null_rate = converted.isna().sum() / len(non_null)
+    return bool(new_null_rate <= threshold)
+```
+
+**Why 5%:**
+- The type detection threshold uses 80% castable to classify a column as numeric. A column with 80% numeric values and 20% non-castable values would have `_detect_column_type()` → `numeric` but `_would_cast_safely()` → False (20% > 5%). This is correct: the column needs a custom transform before a cast is safe.
+- 5% aligns with the acceptable invalid-cell rate: a column with 3 bad values in 100 rows (3%) is a minor data quality issue; a column with 20 bad values in 100 rows (20%) is a format problem that requires explicit treatment.
+- The same 5% is used in `_profile_numeric_column()` as the boundary for reporting `invalid_count`.
+
+**Effect:** The cast is skipped and a `WARNING` is logged identifying the column and the % that would be lost. The column stays as `object` dtype. The format inconsistency detection (Decision 44) will have already added a warning recommending a custom transform — this guard is the enforcement layer that prevents the problem from silently occurring regardless.
+
+---
+
+## 46. Frontend Stack — React + Vite + TypeScript + Tailwind CSS v4
+
+**Decision:** React 19 + Vite 7 + TypeScript + Tailwind CSS v4 for the frontend. TanStack Query v5 for server state, React Router v6 for routing.
+
+**Context:** The frontend needed to be a modern SPA that could interact with the FastAPI backend, render real-time status updates via SSE, and display complex recommendation JSON in an editable form.
+
+**Options considered:**
+
+| Option | Pros | Cons |
+|--------|------|------|
+| Next.js | SSR, file-based routing | Overkill for a single-user internal tool; SSR adds complexity with JWT auth |
+| Plain React + CRA | Simple | CRA is deprecated; slow build |
+| **React + Vite** | Fast HMR, modern, widely used | None significant |
+
+**Why Tailwind v4:** The project was started with Tailwind CSS v4 (latest at time of writing). v4 changed the PostCSS plugin (`@tailwindcss/postcss` instead of `tailwindcss`), the CSS import syntax (`@import "tailwindcss"` instead of `@tailwind` directives), and dark mode variant definition (`@custom-variant dark`). Documented here to avoid confusion with v3 tutorials.
+
+**Node version constraint:** Vite 7 requires Node 20+. The local environment runs Node 16. All production builds run inside Docker (`node:20-alpine`) — local TypeScript type-checking passes but `npm run build` must be run via Docker.
+
+---
+
+## 47. Sidebar Layout — Run ID as Primary Identifier
+
+**Decision:** The sidebar lists runs (not files) as the primary navigation unit, identified by truncated run ID (`#abc12345`), with the filename as a subheading.
+
+**Context:** A dataset can be uploaded and processed multiple times. Using the filename as the primary identifier creates ambiguity — the user cannot distinguish two runs of the same file. Run ID is unique and stable.
+
+**Layout:** Claude/ChatGPT-style dark sidebar (`bg-zinc-900`) with grouped runs (Today / Yesterday / Last 7 days / Older), a status dot per run, and "● live" indicator for the active SSE run. The main content area is light (`bg-gray-50`) to create clear visual separation.
+
+**Pagination:** Sidebar loads files in pages of 20 (`fileLimit` state). "Load more" button increments `fileLimit`, which is part of the React Query key, triggering a fresh cumulative fetch. `hasMore = files.length === fileLimit` detects whether more pages exist without a separate count query.
+
+---
+
+## 48. SSE Authentication — JWT via Query Parameter
+
+**Decision:** The SSE endpoint (`GET /api/files/{file_id}/events`) accepts JWT via `?token=` query parameter, not the standard `Authorization: Bearer` header.
+
+**Context:** The browser's native `EventSource` API does not support setting custom headers. The only way to pass authentication is via URL query parameters or cookies. Cookies would require CORS credential configuration. A query parameter is simpler and consistent with how other SSE implementations handle this constraint.
+
+**Security note:** JWTs in query parameters can appear in server access logs. Acceptable in a development/research prototype context. In production, the preferred alternative would be a short-lived SSE token issued by a dedicated endpoint (`POST /api/sse-token`) exchanged for the real JWT before opening the EventSource connection.
+
+**Backend implementation:** The SSE endpoint decodes the JWT manually using the same secret and algorithm as the standard OAuth2 dependency, then verifies file ownership before streaming.
+
+---
+
+## 49. SSE Reconnect Prevention After Terminal State
+
+**Decision:** The `useRunEvents` hook uses a `doneRef` (React ref) to permanently close the `EventSource` after receiving a terminal status (`COMPLETED` or `FAILED`), preventing the browser's automatic reconnect behaviour.
+
+**Context:** `EventSource` automatically reconnects when the server closes the connection. The backend closes the SSE stream after emitting a terminal status. Without a guard, the browser reconnects immediately, opening a new subscription, triggering another `invalidateQueries` call, and creating an infinite loop of re-fetches.
+
+**Mechanism:**
+```typescript
+const doneRef = useRef(false)
+source.onmessage = (e) => {
+  const data = JSON.parse(e.data)
+  onUpdate(data)
+  if (TERMINAL.has(data.status)) {
+    doneRef.current = true
+    source.close()
+  }
+}
+source.onerror = () => { if (doneRef.current) source.close() }
+```
+
+`doneRef` is a ref (not state) because updating it must not trigger a re-render, and its value must persist across renders without causing the `useEffect` cleanup to run again.
+
+---
+
+## 50. Active Run State — sessionStorage Persistence
+
+**Decision:** The active run state (`liveRun`, `selectedRunId`, `selectedFileId`) is stored in `sessionStorage`, not `useState` alone or `localStorage`.
+
+**Context:** If the user refreshes the page during an active run, pure `useState` would lose the context and the SSE connection — they would see a blank main panel and miss the rest of the run. `localStorage` would persist across browser sessions, which is undesirable for transient UI state.
+
+**sessionStorage** survives page refresh but not a new tab or browser close. This matches user expectation: refreshing during a run keeps context; opening the tool fresh shows a clean state.
+
+---
+
+## 51. Recommendation Diff — Client-Side Pure Function
+
+**Decision:** The diff between generated and applied recommendations is computed entirely on the client as a pure function `computeDiff(generated, applied)`, not precomputed on the backend.
+
+**Context:** Both recommendation objects are already present in the `RunOut` response. Computing the diff server-side would require a new endpoint, additional storage, and re-computation whenever the comparison is viewed. The client already has all the data.
+
+**What is diffed:** Per-column fields (`type`, `fill`, `normalize`, `rename_to`, `nullable`, `transform_hint`, `transform_code`), top-level `duplicates` config, and per-column outlier `strategy`. Bounds (`lower`, `upper`) are excluded — they are system-set and cannot be changed by the user.
+
+**Display:** Three tabs in `RecsViewer` — Generated | Applied | Diff. The Diff tab shows a change count badge and field-level diffs with red strikethrough for old values and green for new values. "No changes" message when applied === generated.
+
+---
+
+## 52. Dark Mode — Tailwind v4 Class Strategy with localStorage Persistence
+
+**Decision:** Dark mode uses Tailwind CSS v4's `@custom-variant dark` with a `.dark` class on `<html>`, toggled by a `useTheme` hook that persists the preference in `localStorage`.
+
+**Context:** Tailwind v4 changed dark mode configuration. The v3 approach (`darkMode: "class"` in `tailwind.config.js`) no longer applies. In v4, class-based dark mode requires:
+```css
+@custom-variant dark (&:where(.dark, .dark *));
+```
+This makes all `dark:` utilities apply when `.dark` is on any ancestor element.
+
+**Why class strategy over `prefers-color-scheme`:** The system media query approach (`prefers-color-scheme: dark`) cannot be overridden by the user within the app. A class-based toggle gives explicit user control, which is the expected behaviour for a tool with a persistent preference.
+
+**Scrollbar theming:** Native browser scrollbars are not affected by Tailwind's `dark:` variants. Custom scrollbar styles are applied via `::-webkit-scrollbar` pseudo-elements and Firefox's `scrollbar-color` property using `.dark` class selectors directly in `index.css`.
+
+---
+
+## 53. Pydantic Silent Field Stripping — transform_hint and transform_code
+
+**Decision:** `transform_hint: str | None = None` and `transform_code: str | None = None` were added explicitly to the `ColumnConfig` Pydantic schema in `backend/app/schemas/file.py`.
+
+**Context:** These fields exist in `recommendations_generated` (added by the LLM enrichment step) but were missing from the Pydantic schema. When the user submitted approved recommendations via `PUT /recommendations`, Pydantic silently dropped any unknown fields before saving to the database. As a result, `recommendations_approved` never contained `transform_hint` or `transform_code`, breaking the transform flow for custom transforms.
+
+**Root cause:** Pydantic v2 defaults to `model_config = ConfigDict(extra="ignore")` — unknown fields are silently discarded, not rejected. This is the correct behaviour for API input validation but creates a footgun when the schema is incomplete.
+
+**Fix:** Explicitly declare all fields that flow through the recommendations JSON in `ColumnConfig`. Similarly, `count: int | None = None` was added to `OutliersConfig` which was also being silently stripped.
+
+**Lesson:** Any field that must survive a round-trip through a Pydantic model must be declared in that model, even if it is only set by internal processes and never validated for user input.
+
+---
+
+## 54. After-Transform Issue Counts — Strategy-Based Outlier Counting
+
+**Decision:** After-transform outlier counts are derived from approved strategies, not from re-profiling the cleaned data.
+
+**Context:** The transform flow re-profiles the cleaned DataFrame to compute `dq_scores_after`. Initially, `count_issues_from_profile()` re-detected outliers from this post-transform profile using IQR. This produced incorrect results — specifically, more outliers after transform than before — for datasets like medical lab data.
+
+**Why re-profiling outliers is invalid:** IQR bounds are computed from the data distribution. After transform, the distribution changes (nulls filled, rows dropped, types cast), so new IQR bounds are computed on a different population. Tighter bounds flag more values as outliers even though the data quality improved. The before/after counts are not comparable because the ruler changes.
+
+**Fix:** `count_issues_from_profile()` accepts an optional `approved_outliers` dict (from `recommendations["outliers"]`). When provided, after-outlier count is computed from strategies: `keep` → retain original count, `winsorise`/`remove`/`cap` → 0. This is logically consistent with what the transform actually did and uses the original IQR bounds implicitly.
+
+**Other issue types (missing, duplicates, type_mismatches, sentinels, format inconsistencies):** Re-profiling is valid for these because their counts are absolute (null count, duplicate row count, etc.) and not dependent on distribution-sensitive bounds.
+
+---
+
+## 55. Per-Run File Logging — Named Logger + Shared File Handler
+
+**Decision:** Both `dq_flow.py` and `transform_flow.py` write per-run file logs to `/logs/<flow>_<filename>_<timestamp>.log`, using a named logger keyed on `run_id` and a shared `FileHandler` that is also attached to the `flows.dq_logic` and `flows.llm_enrichment` module loggers.
+
+**Context:** Prefect's built-in `get_run_logger()` streams logs to the Prefect UI and stdout. These logs disappear when the container restarts and are not accessible if the Prefect server is down. Debugging transform_hint failures and LLM call behaviour required persistent, per-run log files that survive restarts.
+
+**Why named loggers (`dq_run.<run_id>` / `transform_run.<run_id>`):**
+Named loggers allow any task in the same Python process to get the same logger instance by name — `logging.getLogger(f"dq_run.{run_id}")` — without passing the logger object through all task arguments. Since all tasks in a Prefect flow run in the same worker process, the named logger is always available.
+
+**Why shared FileHandler with dq_logic and llm_enrichment:**
+`dq_logic.py` and `llm_enrichment.py` use `logger = logging.getLogger(__name__)` (module-level). At flow startup, `_setup_file_logger()` attaches the same `FileHandler` to these module loggers. This means all log output from profiling, scoring, LLM calls, and transform code generation lands in the same file as the flow orchestration logs, creating a complete single-file trace of the run.
+
+**Log location:** `/logs/` mounted as `./logs:/logs` in `docker-compose.yaml`. Files are visible on the host at `./logs/` immediately, with no need to exec into the container.
+
+**Log format:** `%(asctime)s  %(levelname)-8s  %(message)s` with `datefmt="%Y-%m-%dT%H:%M:%S"` — ISO 8601 timestamp so log files can be sorted chronologically and correlated across services.
+
+**Prefect UI vs file logs:** Both are written — Prefect UI gets `get_run_logger()` output (orchestration-level INFO), file gets DEBUG-level output including per-column profiling details, LLM raw responses, and transform code results.
+
+---
+
+## 56. LLM Call Audit Logging — Timing and Token Counts
+
+**Decision:** Every LLM API call in `llm_enrichment.py` logs: the request (model, max_tokens, attempt number, prompt character count), the response (elapsed seconds, prompt tokens, completion tokens), and the full raw LLM output text.
+
+**Context:** LLM calls are the least deterministic and most expensive part of the pipeline. Without explicit logging, debugging failures — bad JSON, validator rejections, wrong recommendations — required re-running the entire flow. With call/response logging, the exact input and output of every attempt is available in the run log file.
+
+**What is logged per call:**
+```
+LLM enrichment request | model=llama-3.3-70b-versatile max_tokens=512 attempt=1 prompt_chars=1823
+LLM enrichment response | attempt=1 elapsed=0.84s tokens_in=412 tokens_out=187
+LLM enrichment raw output attempt=1:
+{"columns": {"salary": {"missing_values": ...}}}
+```
+
+**Why raw output, not just the parsed result:**
+The raw output captures the LLM's actual response before fence stripping and JSON parsing. If the LLM outputs malformed JSON or adds unexpected markdown, the raw log shows exactly what was received — the parsed result would simply be absent (exception raised).
+
+**Token counts from `response.usage`:** `prompt_tokens` and `completion_tokens` are available in Groq's response object. Logging both makes it possible to track token usage per run, estimate costs, and spot prompt bloat if counts grow unexpectedly.
+
+**Same pattern applied to transform code generation:** Each column-level LLM call for `generate_transform_code()` logs the hint text, the generated lambda, timing, and tokens. This was the specific failure mode that motivated adding file logging — a user-added transform hint was silently skipped, and without per-call logging it was impossible to tell whether the LLM call was made, what it returned, or why the code was not stored.
+
+---
+
+## 57. generate_missing_transform_codes — LLM 2 in Transform Flow
+
+**Decision:** The transform flow calls a new `generate_missing_transform_codes` task between `load_approved_recommendations` and `apply_transform`. This task runs LLM 2 (`generate_transform_code`) for any column that has a `transform_hint` but no `transform_code`.
+
+**Context:** The original design assumed `transform_code` was always generated during the DQ flow (after LLM enrichment) and stored in `recommendations_generated`. When the user submitted approved recommendations, `transform_code` was already present. The transform flow could skip LLM 2 entirely.
+
+**The gap:** Users can manually add `transform_hint` values in the AWAITING_REVIEW UI — the `transform_hint` textarea is editable per column, and any column can have a hint added. When the user submits, `recommendations_approved` contains the hint but no `transform_code` because LLM 2 was never called for the manually-added hint. `apply_recommendations()` step 0b executes `transform_code`, not `transform_hint` directly — so the hint was silently ignored.
+
+**Fix:**
+1. `generate_missing_transform_codes` scans `recommendations["columns"]` for entries with `transform_hint` but no `transform_code`.
+2. If any are found, it calls `generate_transform_code()` (the same LLM 2 function used in the DQ flow) on the full recommendations dict.
+3. The updated recommendations (with newly generated codes) are passed to `apply_transform`.
+4. A safety warning was also added to `dq_logic.py` step 0b: if a column has `transform_hint` but no `transform_code` at apply time, a WARNING is logged so the skip is always visible.
+
+**Why not call LLM 2 in the API layer on submission:** The API layer should not run long-running LLM calls synchronously — it would block the HTTP response. The transform flow already runs asynchronously, making it the right place for this work.
+
+**Soft failure contract preserved:** If LLM 2 fails for a column, that column is skipped (no code generated) and a WARNING is logged. The transform still completes — a missing transform_code means the column data is left unchanged, which is better than a failed run.
+
+---
+
+## 58. Download Button Placement — RunHeader, Not COMPLETED Card
+
+**Decision:** The "Download CSV" button lives in `RunHeader` (always visible at the top of the run detail view when `status === "COMPLETED"`) rather than inside the COMPLETED state card in the main content area.
+
+**Context:** The original implementation placed the download button inside the COMPLETED card alongside the score comparison. This required the user to scroll past the score card and issue grid to reach the download action — the most important action after a completed run.
+
+**Why RunHeader:**
+- The header is always visible regardless of scroll position
+- It is the natural location for primary actions in a document/record view (consistent with most admin UIs)
+- The header already shows the run status, so placing the download button there creates a visual `status=COMPLETED → download available` connection
+- The COMPLETED card can now be entirely informational (scores + issues) without an action mixed in
+
+**Implementation:** `RunDetailView` passes `onDownload={status === "COMPLETED" ? handleDownload : undefined}` to `RunHeader`. The header shows the button only when `status === "COMPLETED" && onDownload` — no button for other statuses.
+
+---
+
+## 59. AWAITING_REVIEW UI — Issues Bar, Rename Checkboxes, Expandable Column Rows
+
+**Decision:** The AWAITING_REVIEW page was redesigned with three specific improvements: (1) an issues summary banner showing counts for all 6 issue types, (2) rename management via per-column checkbox + "Clear all renames" bulk action, (3) warnings/notes/transform hints displayed via icons with an expandable inline detail row per column.
+
+**Context:** The original AWAITING_REVIEW page showed only the overall DQ score as a plain number. Users had no visual summary of what was wrong with their data before reviewing 30+ column rows. Rename suggestions (from LLM) had no easy way to accept or reject them in bulk. Warnings, LLM notes, and transform hints were crammed into a single "Warnings/Notes" column that showed only a truncated value.
+
+**Issues banner:** All 6 issue types (`missing`, `duplicates`, `type_mismatches`, `sentinel_values`, `outliers`, `format_inconsistencies`) are shown. Zero-count types are greyed out rather than hidden — showing "0 duplicates" is informative (it confirms the check ran and found nothing). Values come from `_metadata.issues_found` which is already in the loaded recommendations.
+
+**Rename checkboxes:** The `rename_to` field now has a paired checkbox (`isRenameActive = config.rename_to != null`). Unchecking sets `rename_to: null`, disabling the rename without losing the text in the input (backed by a `useRef` so the value survives unchecking). "Clear all renames" appears above the table only when any renames are active. This was specifically needed because the LLM aggressively renames abbreviated columns — users often want to accept some renames and reject others quickly.
+
+**Expandable rows:** Each column row has an expand toggle (chevron). The expanded detail row (`<tr colSpan={6}`) shows: full warning list (amber), LLM note (grey, read-only), and a transform hint textarea (always shown, editable). Info icons in the summary row indicate at a glance whether warnings/note/hint are present. The expand pattern uses React Fragment to return two `<tr>` elements from a single component — this is the correct approach for table rows that need to expand inline.
+
+**Transform hint editing:** Users can add, edit, or discard transform hints for any column. Discarding sets `transform_hint: null`. When the user submits, any column with a manually-added or edited hint gets `generate_transform_code()` called in the transform flow (Decision #57). The `×` discard button only appears when a hint is present, keeping the UI clean for columns without hints.
+
+---
+
+## 60. MinIO Object Lifecycle Policies — Raw and Curated Buckets
+
+**Context:** MinIO accumulates uploaded CSVs (raw bucket) and cleaned outputs (curated bucket) indefinitely. For a development and demo environment this creates unbounded storage growth with no benefit — users always have their original files locally, and cleaned outputs are downloaded immediately after processing.
+
+**Options considered:**
+1. Manual cleanup — delete files periodically by hand
+2. Application-level deletion — have the backend delete MinIO objects after a run completes or after a download
+3. Bucket-level ILM (lifecycle) rules — MinIO handles expiry automatically, no application code required
+
+**Why ILM rules:** Option 3 requires zero application changes, is enforced at the storage layer regardless of application behaviour, and is the standard S3-compatible approach. Option 2 risks data loss on application bugs and couples storage lifecycle to business logic. Option 1 is not sustainable.
+
+**Retention periods chosen:**
+- `raw`: 7 days — once the DQ flow runs, the original CSV is no longer needed by the pipeline. Users retain their source file locally.
+- `curated`: 14 days — cleaned outputs should remain available long enough for the user to download and use them after processing completes.
+
+**Versioning and delete markers:** Versioning is not enabled on either bucket. `EXPIRE DELETEMARKER` is `false` and irrelevant — objects are permanently deleted after their expiry days with no tombstones.
+
+**Applied via `mc` CLI** (rules survive container restarts via the `minio-data` volume, but must be reapplied if the volume is wiped):
+
+```bash
+docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
+docker exec minio mc ilm rule add --expiry-days 7  local/raw
+docker exec minio mc ilm rule add --expiry-days 14 local/curated
+```
+
+**Active rules:**
+
+`raw` bucket:
+```
+┌───────────────────────────────────────────────────────────────────────────────────────┐
+│ Expiration for latest version (Expiration)                                            │
+├──────────────────────┬─────────┬────────┬──────┬────────────────┬─────────────────────┤
+│ ID                   │ STATUS  │ PREFIX │ TAGS │ DAYS TO EXPIRE │ EXPIRE DELETEMARKER │
+├──────────────────────┼─────────┼────────┼──────┼────────────────┼─────────────────────┤
+│ d6qb7t9roltdr612lsv0 │ Enabled │ -      │ -    │              7 │ false               │
+└──────────────────────┴─────────┴────────┴──────┴────────────────┴─────────────────────┘
+```
+
+`curated` bucket:
+```
+┌───────────────────────────────────────────────────────────────────────────────────────┐
+│ Expiration for latest version (Expiration)                                            │
+├──────────────────────┬─────────┬────────┬──────┬────────────────┬─────────────────────┤
+│ ID                   │ STATUS  │ PREFIX │ TAGS │ DAYS TO EXPIRE │ EXPIRE DELETEMARKER │
+├──────────────────────┼─────────┼────────┼──────┼────────────────┼─────────────────────┤
+│ d6qb7t9roltdrbuu62a0 │ Enabled │ -      │ -    │             14 │ false               │
+└──────────────────────┴─────────┴────────┴──────┴────────────────┴─────────────────────┘
+```

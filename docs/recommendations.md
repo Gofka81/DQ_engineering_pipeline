@@ -17,9 +17,9 @@ Each dimension maps to one or more recommendation types. The "Implementation sco
 | Dimension | What it measures | Recommendation types | Implementation scope |
 |---|---|---|---|
 | **Completeness** | Missing / null values | Missing values strategies | Null ratio at value level only. Does not check population completeness (missing rows) or column-level completeness against a schema. |
-| **Validity** | Values that violate domain rules | Sentinel detection, type recast, outliers | Type mismatches on `object`-dtype columns only. Native `int`/`float` columns are not range-validated. Sentinel detection for string columns only (numeric sentinels like `-999` are a known gap). |
+| **Validity** | Values that violate domain rules | Sentinel detection, type recast, outliers | Type mismatches on `object`-dtype columns only. Native `int`/`float` columns are not range-validated. String sentinels (`N/A`, `unknown`) and numeric sentinels (`-999`, `9999`) both detected. |
 | **Uniqueness** | Duplicate records | Duplicate handling | Exact row duplicates only. Fuzzy / near-duplicate matching is a known gap. |
-| **Consistency** | Format regularity within a column | Type recast, date standardisation | Within-column format patterns (mixed date formats, email pattern matching). Cross-column rule validation ("end_date > start_date") is a known gap. |
+| **Consistency** | Format regularity within a column | Type recast, date standardisation, format inconsistency | Within-column format patterns (mixed date formats, email pattern matching, partial castability detection). Cross-column rule validation ("end_date > start_date") is a known gap. |
 | **Accuracy** | Values match reality | (none — requires ground truth) | Out of scope. |
 | **Timeliness** | Data staleness | (none) | Out of scope. |
 
@@ -47,7 +47,7 @@ When multiple rules could apply to a column, this is the explicit priority order
 
 | Priority | Rule | Owner | Can be overridden by |
 |---|---|---|---|
-| 1 | MAR detection — nulls cluster on a specific value in another column → `leave_null` | Code (todo 1.3 — not yet in baseline) | User only |
+| 1 | MAR detection — `_detect_mar_columns()` (scipy point-biserial + chi-square, α=0.05) → `leave_null` | Code | User only |
 | 2 | ≥50% null → `drop_column` | Code | LLM (MNAR only — event/optional columns), User |
 | 3 | Type-based rules (ID/pattern → `drop_row`, numeric → `median`, etc.) | Code | LLM, User |
 | 4 | LLM semantic override (MNAR `leave_null`, `rename_to`) | LLM | User |
@@ -100,14 +100,24 @@ These are **validity issues, not completeness issues** — the cell is not null,
 
 ### Detection
 
-The profiler detects sentinel patterns and reports them as `invalid_count` per column:
-- String sentinels: `"N/A"`, `"n/a"`, `"NA"`, `"none"`, `"null"`, `"unknown"`, `"undefined"`, `"-"`, `"?"`, `""`
-- Numeric sentinels: values that are implausibly extreme for the column's distribution (e.g. `-999`, `9999`, `99`) and appear with suspiciously high frequency
-- Sample rows surfaced to the LLM so it can spot domain-specific patterns
+The profiler detects both string and numeric sentinel patterns and stores them in `sentinel_count` + `sentinel_values` per column:
+
+**String sentinels** (`_count_sentinels()`): Normalised (lowercase + strip) membership check against a fixed set:
+`n/a`, `na`, `null`, `none`, `unknown`, `missing`, `undefined`, `-`, `?`, `""`
+
+**Numeric sentinels** (`_detect_numeric_sentinels()`): Values that are both statistically extreme AND appear with suspicious frequency:
+- Must fall outside Q1 − 3×IQR or Q3 + 3×IQR (stricter than the 1.5×IQR outlier fence)
+- Must appear **≥5 times** in the column (absolute count — percentage thresholds silently fail on large datasets where e.g. 34 occurrences of −999 in 1,200 rows = 2.8% would not be detected)
+- Column must have ≥10 non-null values (not enough data to compute a meaningful fence below this)
 
 ### Recommendation
 
-When `invalid_count > 0` for a column, the recommendation flags the column with a `warning` describing the sentinel pattern. The user decides whether to convert sentinels to null (then impute) or filter the rows. **Automatic conversion is not applied** — sentinel replacement is a destructive operation that requires user confirmation.
+When `sentinel_count > 0`, the recommendation:
+1. Stores the detected sentinel values in `columns[col].sentinel_values` (list of values)
+2. Adds a `warning` string describing the sentinel pattern and count
+3. **Automatically replaces sentinel values with NaN** in step 0 of `apply_recommendations()` — sentinels in numeric columns are replaced before any fill strategy is applied, so the fill is applied to real nulls only
+
+The replacement at apply time means a `missing_values` fill strategy is automatically generated for any column that has sentinels but no real nulls — the fill will handle the NaN created by the sentinel replacement.
 
 ---
 
@@ -120,11 +130,15 @@ For every column: infer the correct type from the actual values and recommend a 
 | All non-null values are whole numbers | `int` |
 | Numeric values with decimals present | `float` |
 | ≥80% of string values parse as ISO 8601 date or common date format | `date` |
-| Values are only true/false variants (`true`, `false`, `1`, `0`, `yes`, `no`) | `bool` |
+| Values are only true/false variants (`true`, `false`, `1`, `0`, `yes`, `no`, `y`, `n`, `on`, `off`) | `bool` |
 | Everything else | `string` |
 | `nullable: true` | Column has any nulls or invalid cells |
 
-**Date standardisation:** When a column is recast to `date`, the transform pipeline normalises all values to ISO 8601 format (`YYYY-MM-DD`). Columns storing dates as `"2003/01/15"`, `"15-01-2003"`, or `"Jan 15, 2003"` are all standardised to `"2003-01-15"` on transform.
+**Date standardisation:** When a column is recast to `date`, the transform pipeline normalises all values to ISO 8601 format (`YYYY-MM-DD`). Columns storing dates as `"2003/01/15"`, `"15-01-2003"`, or `"Jan 15, 2003"` are all standardised to `"2003-01-15"` on transform. `NaT` values are preserved as `null` in the output.
+
+**Type cast guard:** Before applying any `int` or `float` cast, `_would_cast_safely()` simulates the cast and checks how many non-null values would become `NaN` (via `errors="coerce"`). If >5% of non-null values would be lost, the cast is **skipped** and a warning is logged. This prevents a column like `["50000", "60000", "N/A"]` where `"N/A"` is 33% of values from silently losing a third of its data. The column stays as `object` dtype — it needs a custom transform to normalise the format first.
+
+**Format inconsistency detection** (separate from sentinels): A string column that partially casts to numeric — `castable_count ≥ 5` non-null values convert successfully AND `castable_pct < 80%` — is flagged as having mixed formats. This generates a `warning` in `columns[col].warnings` and surfaces the issue as `format_inconsistency: true` in the profiler output. The column is a candidate for a custom transform (section 9). The cast guard then prevents the cast from proceeding.
 
 ---
 
@@ -143,7 +157,7 @@ Outliers are values that are statistically extreme relative to the column's dist
 | **IQR (Interquartile Range)** | Skewed distributions (most real-world data) | Below Q1 − 1.5×IQR or above Q3 + 1.5×IQR | ✓ |
 | **Z-score** | Normally distributed data | \|z\| > 3 (i.e. >3 standard deviations from mean) | Not yet |
 
-The pipeline uses IQR by default (more robust for skewed data). The outlier count reported in the profile is IQR-based.
+The pipeline uses IQR for outlier *detection*. The outlier count reported in the profile is IQR-based.
 
 ### Treatment Options (user selects)
 
@@ -153,6 +167,8 @@ The pipeline uses IQR by default (more robust for skewed data). The outlier coun
 | `winsorise` | Cap at the nearest non-outlier boundary (Q3 + 1.5×IQR or Q1 − 1.5×IQR) | Preserves row count; reduces extreme influence on models |
 | `remove` | Drop rows where the column value is an outlier | Only when outliers are confirmed data entry errors |
 | `cap` | Cap at user-defined min/max | When domain bounds are known (e.g. human age: 0–120) |
+
+**Treatment is applied automatically** in step 3b of `apply_recommendations()` using the `outliers[col].strategy` value the user set. The default strategy in the generated recommendations is `"keep"` — no change is made unless the user switches it.
 
 **Domain violations** (age = -1, temperature = -999) are a **validity** issue (sentinel value), not a statistical outlier — see section 2 above.
 
@@ -198,11 +214,13 @@ For numeric columns where `col_max_abs > 100` AND the column has a non-zero rang
 | Method | Effect | When to prefer | Implemented |
 |---|---|---|---|
 | **Min-max** [0, 1] | Scales to fixed range | When distribution bounds are known and outliers are few | ✓ |
-| **Z-score** (standardisation) | Mean=0, std=1 | When outliers are present or distribution is unknown | Not yet |
+| **Z-score** (standardisation) | Mean=0, std=1 | When outliers are present or distribution is unknown | ✓ |
 
-**Current implementation:** Only min-max is applied. The `normalize: true` field triggers min-max scaling. Z-score is documented for future implementation (todo 4.4).
+The pipeline automatically selects the method:
+- `"z_score"` — when the column has detected outliers (IQR count > 0). Z-score is more robust to outliers because it uses mean + std; min-max is pulled by extreme values.
+- `"min_max"` — when no outliers are detected. Min-max gives interpretable [0,1] bounds when the range is well-defined.
 
-Advisory only — the user reviews the recommendation in the JSON and may reject it by setting `normalize: false`.
+Z-score uses population std (`ddof=0`, sklearn-compatible). `normalize: false` means no scaling is suggested. Advisory — the user may override by setting `normalize: false` in the reviewed JSON.
 
 ---
 
@@ -268,84 +286,113 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
 {
   "columns": {
     "customer_id": {
-      "type":           "string",
-      "nullable":       false,
-      "missing_values": null,
-      "normalize":      false,
-      "warning":        null,
-      "note":           null
+      "type":            "string",
+      "nullable":        false,
+      "missing_values":  null,
+      "normalize":       false,
+      "warnings":        [],
+      "note":            null,
+      "sentinel_values": null
     },
     "age": {
-      "type":           "int",
-      "nullable":       true,
-      "missing_values": { "strategy": "median", "value": 34 },
-      "normalize":      false,
-      "warning":        null,
-      "note":           null
+      "type":            "int",
+      "nullable":        true,
+      "missing_values":  { "strategy": "median", "value": 34 },
+      "normalize":       false,
+      "warnings":        [],
+      "note":            null,
+      "sentinel_values": null
     },
     "salary": {
-      "type":           "float",
-      "nullable":       true,
-      "missing_values": { "strategy": "mean", "value": null },
-      "normalize":      true,
-      "warning":        null,
-      "note":           "Distribution is symmetric — mean is appropriate; consider z-score normalization for ML use."
+      "type":            "float",
+      "nullable":        true,
+      "missing_values":  { "strategy": "median", "value": null },
+      "normalize":       "z_score",
+      "warnings":        [],
+      "note":            "Right-skewed distribution with outliers — median is more robust than mean; z-score normalization handles the outlier influence.",
+      "sentinel_values": null,
+      "rename_to":       "salary_usd"
+    },
+    "temp_c": {
+      "type":            "float",
+      "nullable":        true,
+      "missing_values":  { "strategy": "median", "value": null },
+      "normalize":       false,
+      "warnings":        ["'temp_c' has 5 numeric sentinel values [-999.0]. These will be replaced with NaN before filling."],
+      "note":            null,
+      "sentinel_values": [-999.0]
     },
     "joined_at": {
-      "type":           "date",
-      "nullable":       true,
-      "missing_values": { "strategy": "drop_row", "value": null },
-      "normalize":      false,
-      "warning":        "drop_row will remove up to 3 rows (1.5% of dataset) where 'joined_at' is null",
-      "note":           null
+      "type":            "date",
+      "nullable":        true,
+      "missing_values":  { "strategy": "drop_row", "value": null },
+      "normalize":       false,
+      "warnings":        ["drop_row will remove up to 3 rows (1.5% of dataset) where 'joined_at' is null"],
+      "note":            null,
+      "sentinel_values": null
     },
     "is_active": {
-      "type":           "bool",
-      "nullable":       true,
-      "missing_values": { "strategy": "fill", "value": false },
-      "normalize":      false,
-      "warning":        null,
-      "note":           "Defaulting to inactive — safer assumption for records with no known activity"
+      "type":            "bool",
+      "nullable":        true,
+      "missing_values":  { "strategy": "fill", "value": false },
+      "normalize":       false,
+      "warnings":        [],
+      "note":            "Defaulting to inactive — safer assumption for records with no known activity",
+      "sentinel_values": null
     },
     "email": {
-      "type":           "string",
-      "nullable":       true,
-      "missing_values": { "strategy": "drop_row", "value": null },
-      "normalize":      false,
-      "warning":        "drop_row will remove up to 8 rows (4.0% of dataset) where 'email' is null or invalid",
-      "note":           null
+      "type":            "string",
+      "nullable":        true,
+      "missing_values":  { "strategy": "drop_row", "value": null },
+      "normalize":       false,
+      "warnings":        ["drop_row will remove up to 8 rows (4.0% of dataset) where 'email' is null or invalid"],
+      "note":            null,
+      "sentinel_values": null
     },
     "department": {
-      "type":           "string",
-      "nullable":       true,
-      "missing_values": { "strategy": "mode", "value": "Engineering" },
-      "normalize":      false,
-      "warning":        null,
-      "note":           null
+      "type":            "string",
+      "nullable":        true,
+      "missing_values":  { "strategy": "mode", "value": "Engineering" },
+      "normalize":       false,
+      "warnings":        [],
+      "note":            null,
+      "sentinel_values": null
+    },
+    "mixed_amount": {
+      "type":            "string",
+      "nullable":        false,
+      "missing_values":  null,
+      "normalize":       false,
+      "warnings":        ["'mixed_amount' has mixed value formats — 35.0% of values are not numeric-castable (e.g. '$1,200', 'N/A', 'TBD'). Type cast would corrupt data; a custom transform is needed to normalize format first."],
+      "note":            null,
+      "sentinel_values": null
     },
     "adv_evt_dt": {
-      "type":           "date",
-      "nullable":       true,
-      "missing_values": { "strategy": "leave_null", "value": null },
-      "normalize":      false,
-      "warning":        null,
-      "note":           "74% null — adverse event dates are null for patients who had no adverse event. Nulls are intentional and clinically meaningful."
+      "type":            "date",
+      "nullable":        true,
+      "missing_values":  { "strategy": "leave_null", "value": null },
+      "normalize":       false,
+      "warnings":        [],
+      "note":            "74% null — adverse event dates are null for patients who had no adverse event. Nulls are intentional and clinically meaningful.",
+      "sentinel_values": null
     },
     "merchant_nm": {
-      "type":           "string",
-      "nullable":       true,
-      "missing_values": { "strategy": "leave_null", "value": null },
-      "normalize":      false,
-      "warning":        null,
-      "note":           "Nulls correlate with txn_typ=atm (100% of nulls). ATM transactions have no merchant — structural null."
+      "type":            "string",
+      "nullable":        true,
+      "missing_values":  { "strategy": "leave_null", "value": null },
+      "normalize":       false,
+      "warnings":        [],
+      "note":            "Nulls correlate with txn_typ=atm (100% of nulls). ATM transactions have no merchant — structural null.",
+      "sentinel_values": null
     },
     "sparse_col": {
-      "type":           "string",
-      "nullable":       true,
-      "missing_values": { "strategy": "drop_column", "value": null },
-      "normalize":      false,
-      "warning":        "drop_column will remove the entire 'sparse_col' column (62% of values are missing)",
-      "note":           null
+      "type":            "string",
+      "nullable":        true,
+      "missing_values":  { "strategy": "drop_column", "value": null },
+      "normalize":       false,
+      "warnings":        ["drop_column will remove the entire 'sparse_col' column (62% of values are missing)"],
+      "note":            null,
+      "sentinel_values": null
     }
   },
   "duplicates": {
@@ -367,10 +414,12 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
     "generated_at": "2026-02-28T12:00:00.000000",
     "dq_score":     67.4,
     "issues_found": {
-      "missing":         42,
-      "duplicates":       5,
-      "type_mismatches":  3,
-      "invalid_values":   8
+      "missing":             42,
+      "duplicates":           5,
+      "type_mismatches":      3,
+      "invalid_values":       8,
+      "sentinel_values":     12,
+      "format_inconsistency": 1
     }
   }
 }
@@ -385,9 +434,11 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
 | `type` | `int` `float` `string` `date` `bool` | Code |
 | `nullable` | `true` if column has any nulls or invalid cells | Code |
 | `missing_values` | `null` if no action needed, otherwise `{strategy, value}` | Code (MAR + threshold rules), LLM (MNAR), user |
-| `normalize` | `true` if scaling is suggested | Code |
-| `warning` | Human-readable impact message for `drop_row` / `drop_column` | Code |
-| `note` | Explanation of why this recommendation was made or changed | LLM / user |
+| `normalize` | `"min_max"` (no outliers), `"z_score"` (outliers present), or `false` (no scaling needed) | Code |
+| `warnings` | List of human-readable impact messages (drop_row, drop_column, sentinel, format inconsistency) | Code |
+| `note` | One-sentence explanation of reasoning for the recommendation | LLM / user |
+| `sentinel_values` | List of detected sentinel values (e.g. `[-999.0]`), or `null` if none | Code |
+| `rename_to` | LLM-suggested clearer column name (Python identifier), or `null` | LLM / user |
 
 **`missing_values.strategy` options**
 
@@ -401,7 +452,7 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
 | `drop_column` | Yes — columns ≥50% missing and not MAR | Remove the entire column |
 | `leave_null` | Code (MAR), LLM (MNAR), or user | Keep nulls as-is — no fill, no rows dropped |
 
-**`outliers.<col>` fields** *(advisory — not yet applied automatically)*
+**`outliers.<col>` fields** *(default strategy `keep` — applied automatically in step 3b when user changes to `winsorise`/`remove`/`cap`)*
 
 | Field | Values |
 |---|---|
