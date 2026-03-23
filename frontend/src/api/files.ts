@@ -3,10 +3,12 @@ import type { FileOut, FileUploadResponse, FileWithLatestRunOut, RunOut, RunStat
 
 export async function uploadFile(
   file: File,
-  onProgress?: (pct: number) => void
+  onProgress?: (pct: number) => void,
+  hasHeader = true
 ): Promise<FileUploadResponse> {
   const form = new FormData()
   form.append("file", file)
+  form.append("has_header", String(hasHeader))
   const res = await client.post<FileUploadResponse>("/files/upload", form, {
     onUploadProgress: (e) => {
       if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))

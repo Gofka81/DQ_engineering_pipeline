@@ -9,7 +9,7 @@ from uuid import UUID
 import pandas as pd
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from jose import JWTError, jwt
 from sqlalchemy import select, true
@@ -45,6 +45,7 @@ MAX_FILE_SIZE = settings.MAX_FILE_SIZE_MB * 1024 * 1024  # Convert to bytes
 @router.post("/upload", response_model=FileUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file(
     file: UploadFile = File(..., description="CSV file to upload"),
+    has_header: bool = Form(True, description="Whether the CSV has a header row"),
     db: AsyncSession = Depends(get_db),
     minio: MinioService = Depends(get_minio_service),
     redis: RedisService = Depends(get_redis_service),
@@ -105,6 +106,7 @@ async def upload_file(
         minio_raw_path=minio_path,
         file_size=file_size,
         content_type="text/csv",
+        has_header=has_header,
     )
     db.add(db_file)
     await db.flush()
@@ -126,6 +128,7 @@ async def upload_file(
             run_id=db_run.id,
             file_id=db_file.id,
             minio_path=minio_path,
+            has_header=has_header,
         )
     except Exception:
         raise HTTPException(
@@ -137,6 +140,7 @@ async def upload_file(
         id=db_file.id,
         original_filename=db_file.original_filename,
         file_size=db_file.file_size,
+        has_header=db_file.has_header,
         uploaded_at=db_file.uploaded_at,
         run_id=db_run.id,
         status=db_run.status,
@@ -382,6 +386,7 @@ async def update_recommendations(
             run_id=run.id,
             file_id=file_id,
             minio_path=file_record.minio_raw_path,
+            has_header=file_record.has_header,
         )
     except Exception:
         raise HTTPException(
@@ -727,7 +732,11 @@ async def get_run_preview(
 
     try:
         response = minio.client.get_object(bucket_name=bucket, object_name=path)
-        df = pd.read_csv(response, nrows=20)
+        if stage == "raw" and not file.has_header:
+            df = pd.read_csv(response, nrows=20, header=None)
+            df.columns = [f"col_{i}" for i in range(len(df.columns))]
+        else:
+            df = pd.read_csv(response, nrows=20)
         response.close()
         response.release_conn()
     except Exception:

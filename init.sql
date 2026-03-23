@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS files (
     minio_raw_path    VARCHAR(512) NOT NULL,
     file_size         BIGINT NOT NULL,
     content_type      VARCHAR(100) DEFAULT 'text/csv',
+    has_header        BOOLEAN NOT NULL DEFAULT TRUE,
     uploaded_at       TIMESTAMPTZ DEFAULT NOW()
 );
 

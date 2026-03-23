@@ -52,6 +52,7 @@ async def trigger_flow(job: dict) -> None:
                 "run_id":     job["run_id"],
                 "file_id":    job["file_id"],
                 "minio_path": job["minio_path"],
+                "has_header": job.get("has_header", True),
             },
             timeout=0,      # fire and forget
             as_subflow=False,

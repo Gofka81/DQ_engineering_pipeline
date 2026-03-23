@@ -91,6 +91,7 @@ class FileUploadResponse(BaseModel):
     id: UUID
     original_filename: str
     file_size: int
+    has_header: bool
     uploaded_at: datetime
     run_id: UUID
     status: RunStatus
@@ -102,6 +103,7 @@ class FileOut(BaseModel):
     id: UUID
     original_filename: str
     file_size: int
+    has_header: bool = True
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}

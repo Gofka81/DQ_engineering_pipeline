@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 import { uploadFile } from "../../api/files"
 import type { FileUploadResponse } from "../../types"
 
@@ -10,6 +10,13 @@ export function UploadZone({ onUploaded }: Props) {
   const [dragging, setDragging] = useState(false)
   const [progress, setProgress] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [hasHeader, setHasHeader] = useState(true)
+  const hasHeaderRef = useRef(true)
+
+  const handleHasHeaderChange = (value: boolean) => {
+    hasHeaderRef.current = value
+    setHasHeader(value)
+  }
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".csv")) {
@@ -23,7 +30,7 @@ export function UploadZone({ onUploaded }: Props) {
     setError(null)
     setProgress(0)
     try {
-      const res = await uploadFile(file, setProgress)
+      const res = await uploadFile(file, setProgress, hasHeaderRef.current)
       onUploaded(res)
     } catch (err: unknown) {
       const msg =
@@ -79,6 +86,21 @@ export function UploadZone({ onUploaded }: Props) {
           <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1 text-center">{progress}%</p>
         </div>
       )}
+
+      <label className="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-600 dark:text-zinc-300">
+        <input
+          type="checkbox"
+          checked={hasHeader}
+          onChange={(e) => handleHasHeaderChange(e.target.checked)}
+          className="w-4 h-4 rounded accent-blue-500"
+        />
+        First row is a header
+        {!hasHeader && (
+          <span className="text-gray-400 dark:text-zinc-500 text-xs">
+            — columns will be named col_0, col_1, ...
+          </span>
+        )}
+      </label>
 
       {error && <p className="text-red-500 text-sm">{error}</p>}
     </div>

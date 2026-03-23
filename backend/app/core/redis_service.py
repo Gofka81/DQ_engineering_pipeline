@@ -26,13 +26,14 @@ class RedisService:
         self.jobs_queue = settings.REDIS_JOBS_QUEUE
         self._initialized = True
 
-    def push_job(self, job_type: str, run_id, file_id, minio_path: str) -> None:
+    def push_job(self, job_type: str, run_id, file_id, minio_path: str, has_header: bool = True) -> None:
         """Push a job to the shared queue. job_type: 'dq_analysis' | 'transform'."""
         job = {
             "job_type":   job_type,
             "run_id":     str(run_id),
             "file_id":    str(file_id),
             "minio_path": minio_path,
+            "has_header": has_header,
         }
         self.client.lpush(self.jobs_queue, json.dumps(job))
 

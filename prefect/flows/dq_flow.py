@@ -26,7 +26,7 @@ def _flog(run_id: str) -> logging.Logger:
 
 
 @task(retries=3, retry_delay_seconds=5)
-def load_dataframe_from_minio(minio_path: str, run_id: str) -> tuple[pd.DataFrame, int]:
+def load_dataframe_from_minio(minio_path: str, run_id: str, has_header: bool = True) -> tuple[pd.DataFrame, int]:
     """
     Load CSV from MinIO into a pandas DataFrame.
 
@@ -42,7 +42,7 @@ def load_dataframe_from_minio(minio_path: str, run_id: str) -> tuple[pd.DataFram
     log = _flog(run_id)
 
     logger.info(f"Loading dataframe from MinIO: {minio_path}")
-    log.info(f"[load] reading raw CSV: {minio_path}")
+    log.info(f"[load] reading raw CSV: {minio_path} (has_header={has_header})")
 
     client = get_minio_client()
     bucket = get_minio_raw_bucket()
@@ -50,7 +50,7 @@ def load_dataframe_from_minio(minio_path: str, run_id: str) -> tuple[pd.DataFram
     response = None
     try:
         response = client.get_object(bucket_name=bucket, object_name=minio_path)
-        df, malformed_rows = parse_csv(response)
+        df, malformed_rows = parse_csv(response, has_header=has_header)
     except S3Error as e:
         log.error(f"[load] S3Error: {e}")
         raise RuntimeError(f"Failed to load {minio_path} from MinIO bucket '{bucket}': {e}")
@@ -259,7 +259,7 @@ async def save_results_to_db(run_id: str, profile: dict[str, Any], recommendatio
 # ---------------------------------------------------------------------------
 
 @flow(name="DQ Analysis", log_prints=True)
-async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str):
+async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str, has_header: bool = True):
     """
     Main DQ Analysis flow.
 
@@ -267,20 +267,21 @@ async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str):
         run_id:     UUID of the run record
         file_id:    UUID of the file record
         minio_path: Path to file in MinIO raw bucket
+        has_header: whether the CSV has a header row (default True)
     """
     filename = Path(minio_path).stem
     log, log_path = setup_file_logger(run_id, filename, "dq")
 
     logger = get_run_logger()
     logger.info(f"Starting DQ Analysis for run_id={run_id}, file_id={file_id}")
-    log.info(f"=== DQ Analysis flow start | run={run_id} file={file_id} path={minio_path} ===")
+    log.info(f"=== DQ Analysis flow start | run={run_id} file={file_id} path={minio_path} has_header={has_header} ===")
     log.info(f"Log file: {log_path}")
 
     try:
         await update_run_status(run_id, "ANALYZING")
         _publish_status(run_id, {"status": "ANALYZING"})
 
-        df, malformed_rows       = load_dataframe_from_minio(minio_path, run_id)
+        df, malformed_rows       = load_dataframe_from_minio(minio_path, run_id, has_header=has_header)
         profile                  = profile_data(df, run_id, malformed_rows)
         dq_score                 = calculate_dq_score(profile, run_id)
         recommendations          = generate_recommendations(df, profile, dq_score, run_id)

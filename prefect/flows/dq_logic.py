@@ -41,13 +41,17 @@ _TRANSFORM_SAFE_GLOBALS = {
 # Public API
 # ---------------------------------------------------------------------------
 
-def parse_csv(stream) -> tuple[pd.DataFrame, int]:
+def parse_csv(stream, has_header: bool = True) -> tuple[pd.DataFrame, int]:
     """
     Parse a CSV from any file-like stream.
 
     Malformed rows (mismatched field count) are counted and skipped rather than
     raising an exception. Accepts any stream pd.read_csv() understands
     (MinIO urllib3 response, BytesIO, file handle).
+
+    Args:
+        stream:     file-like stream
+        has_header: if False, the CSV has no header row; columns are named col_0, col_1, ...
 
     Returns:
         df:             parsed DataFrame
@@ -62,7 +66,9 @@ def parse_csv(stream) -> tuple[pd.DataFrame, int]:
     # Buffer into BytesIO — raw urllib3 responses (MinIO) are not reliably
     # iterable by the Python CSV engine. BytesIO is seekable and works with both engines.
     buf = io.BytesIO(stream.read())
-    df = pd.read_csv(buf, on_bad_lines=_on_bad_line, engine="python")
+    df = pd.read_csv(buf, on_bad_lines=_on_bad_line, engine="python", header=0 if has_header else None)
+    if not has_header:
+        df.columns = [f"col_{i}" for i in range(len(df.columns))]
     return df, malformed_rows
 
 

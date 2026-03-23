@@ -130,6 +130,7 @@ export interface FileOut {
   id: string
   original_filename: string
   file_size: number
+  has_header: boolean
   uploaded_at: string
 }
 
@@ -177,6 +178,7 @@ export interface FileUploadResponse {
   id: string
   original_filename: string
   file_size: number
+  has_header: boolean
   uploaded_at: string
   run_id: string
   status: RunStatus

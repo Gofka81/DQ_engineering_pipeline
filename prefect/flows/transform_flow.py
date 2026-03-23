@@ -34,13 +34,13 @@ def _flog(run_id: str) -> logging.Logger:
 
 
 @task(retries=3, retry_delay_seconds=5)
-def load_dataframe_from_minio(minio_path: str, run_id: str) -> pd.DataFrame:
+def load_dataframe_from_minio(minio_path: str, run_id: str, has_header: bool = True) -> pd.DataFrame:
     """Load CSV from MinIO raw bucket into a DataFrame."""
     logger = get_run_logger()
     log = _flog(run_id)
 
     logger.info(f"Loading dataframe from MinIO: {minio_path}")
-    log.info(f"[load] reading raw CSV: {minio_path}")
+    log.info(f"[load] reading raw CSV: {minio_path} (has_header={has_header})")
 
     client = get_minio_client()
     bucket = get_minio_raw_bucket()
@@ -48,7 +48,7 @@ def load_dataframe_from_minio(minio_path: str, run_id: str) -> pd.DataFrame:
     response = None
     try:
         response = client.get_object(bucket_name=bucket, object_name=minio_path)
-        df, malformed_rows = parse_csv(response)
+        df, malformed_rows = parse_csv(response, has_header=has_header)
     except S3Error as e:
         log.error(f"[load] S3Error: {e}")
         raise RuntimeError(f"Failed to load {minio_path} from MinIO bucket '{bucket}': {e}")
@@ -325,7 +325,7 @@ async def save_transform_results_to_db(
 # ---------------------------------------------------------------------------
 
 @flow(name="Transform", log_prints=True)
-async def transform_flow(run_id: str, file_id: str, minio_path: str):
+async def transform_flow(run_id: str, file_id: str, minio_path: str, has_header: bool = True):
     """
     Transform flow — applies user-approved recommendations and saves cleaned file.
 
@@ -333,20 +333,21 @@ async def transform_flow(run_id: str, file_id: str, minio_path: str):
         run_id:     UUID of the run record
         file_id:    UUID of the file record
         minio_path: Path to the raw file in MinIO (same path DQ flow used)
+        has_header: whether the CSV has a header row (must match DQ flow setting)
     """
     filename = Path(minio_path).stem
     log, log_path = setup_file_logger(run_id, filename, "transform")
 
     logger = get_run_logger()
     logger.info(f"Starting Transform for run_id={run_id}, file_id={file_id}")
-    log.info(f"=== Transform flow start | run={run_id} file={file_id} path={minio_path} ===")
+    log.info(f"=== Transform flow start | run={run_id} file={file_id} path={minio_path} has_header={has_header} ===")
     log.info(f"Log file: {log_path}")
 
     try:
         await update_run_status(run_id, "TRANSFORMING")
         _publish_status(run_id, {"status": "TRANSFORMING"})
 
-        df              = load_dataframe_from_minio(minio_path, run_id)
+        df              = load_dataframe_from_minio(minio_path, run_id, has_header=has_header)
         recommendations = await load_approved_recommendations(run_id)
         recommendations = generate_transform_codes(recommendations, df, run_id)
         cleaned_df      = apply_transform(df, recommendations, run_id)
