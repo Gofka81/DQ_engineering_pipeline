@@ -80,6 +80,7 @@ This document captures every significant architectural and technical decision ma
 69. [Drop-Impact Bitsets — Precomputed at Analysis Time](#69-drop-impact-bitsets--precomputed-at-analysis-time)
 70. [Extract Shared Flow Utilities to `flows/common.py`](#70-extract-shared-flow-utilities-to-flowscommonpy)
 71. [Outlier Strategy Heuristic + LLM Domain Note](#71-outlier-strategy-heuristic--llm-domain-note)
+72. [Headless CSV Support — Explicit `has_header` Flag](#72-headless-csv-support--explicit-has_header-flag)
 
 ---
 
@@ -1790,3 +1791,27 @@ Numeric/date columns get `stats`. String/bool columns get `unique_count`, `cardi
 - Merge into `clients.py` — wrong abstraction; `clients.py` is for infrastructure factories, not Prefect tasks
 
 **Why `common.py`:** Dedicated module keeps the separation clear — `clients.py` is for infra clients, `common.py` is for shared Prefect flow logic. `setup_file_logger` is parameterised with a `prefix` argument (`"dq"` or `"transform"`) so the log filename and logger name remain flow-specific without duplicating the function body.
+
+## 72. Headless CSV Support — Explicit `has_header` Flag
+
+**Decision:** Add a `has_header: bool` flag (default `True`) to the upload form. When `False`, `parse_csv()` passes `header=None` to `pd.read_csv()` and renames columns to `col_0, col_1, col_2...`. The flag is stored on the `files` table and propagated through the full pipeline (Redis job payload → Prefect flows → `parse_csv`). No auto-detection or auto-correction — the user declares the format explicitly. The Data Preview endpoint also respects `has_header` for the raw stage so the preview is consistent with the processed DataFrame.
+
+**Context:** `pd.read_csv()` defaults to `header=0`, silently treating the first data row as column names for headless files. Every downstream step — profiling, scoring, recommendations, LLM enrichment — then operates on wrong column names and one fewer row of data. A DQ tool introducing data corruption is the worst possible outcome.
+
+**Options considered:**
+
+1. **Auto-detection only** — inspect the first row and infer whether it looks like a header. Rejected: ambiguous for string columns (e.g. `"John", "Smith", "Sales"` could be header or data). Silent mis-detection is worse than asking the user.
+
+2. **Explicit flag only** — user declares `has_header` at upload. Simple, zero ambiguity, correct by construction.
+
+3. **Explicit flag + heuristic advisory** — run a fast heuristic (all-numeric first row → likely headless) and surface a non-blocking warning in the upload response. The user can ignore it or re-upload with the flag set.
+
+**Why we chose explicit flag only (option 2):** The target users are data engineers who know their data format. The heuristic advisory adds UI complexity for an edge case; the explicit flag adds one checkbox to the upload form with a sensible default that covers 95%+ of real-world CSVs. Option 3 remains a future UX improvement if user feedback indicates it.
+
+**Synthetic column naming:** Headless columns are named `col_0, col_1, ...` (zero-indexed). The LLM rename feature (`rename_to`) provides the most value here — it infers semantic names from data patterns (UUID formats → `order_id`, categorical booleans → `return_flag`, etc.) and presents suggestions to the user for approval.
+
+**Data Preview consistency:** The raw preview endpoint (`GET /runs/{run_id}/preview?stage=raw`) previously called `pd.read_csv(response, nrows=20)` with default `header=0`, showing original header values as column names regardless of `has_header`. For `stage=raw`, the endpoint now reads `file.has_header` and passes `header=None` + renames to `col_*` when headless, matching what the pipeline processed. The cleaned preview (`stage=cleaned`) always uses `header=0` — the curated CSV is written by `df.to_csv(index=False)` which always emits a header row.
+
+**Frontend stale closure fix:** The `hasHeader` state is mirrored to a `useRef` in `UploadZone`. `handleFile` reads from the ref rather than the state captured in its `useCallback` closure. This avoids a subtle bug where the memoised callback could capture the initial `true` value if the user toggled the checkbox and immediately dropped a file before React re-rendered.
+
+**Migration:** `init.sql` adds the column for fresh installs. Existing installs require: `ALTER TABLE files ADD COLUMN IF NOT EXISTS has_header BOOLEAN NOT NULL DEFAULT TRUE;`
