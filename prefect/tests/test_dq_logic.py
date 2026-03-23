@@ -33,6 +33,7 @@ from flows.dq_logic import (
     _count_sentinels,
     _detect_column_type,
     _fill_strategy,
+    _outlier_strategy,
     _profile_numeric_column,
     _profile_string_column,
     _schema_type,
@@ -1964,3 +1965,29 @@ class TestSentinelValuesEndToEnd:
         col = recs["columns"]["status"]
         assert col.get("sentinel_values") is None
         assert "replace_sentinels" not in col
+
+
+# ===========================================================================
+# _outlier_strategy
+# ===========================================================================
+
+class TestOutlierStrategy:
+    def test_small_dataset_always_winsorise(self):
+        # 10 outliers in 50 rows (20%) — small dataset rule fires first regardless of pct
+        assert _outlier_strategy(10, 50) == "winsorise"
+
+    def test_under_1pct_remove(self):
+        # 1 outlier in 200 rows (0.5%) — below 1% threshold → remove
+        assert _outlier_strategy(1, 200) == "remove"
+
+    def test_between_1_and_5pct_winsorise(self):
+        # 5 outliers in 200 rows (2.5%) — within 1–5% range → winsorise
+        assert _outlier_strategy(5, 200) == "winsorise"
+
+    def test_exactly_5pct_winsorise(self):
+        # 10 outliers in 200 rows (5.0%) — at the 5% boundary → winsorise (≤ 0.05)
+        assert _outlier_strategy(10, 200) == "winsorise"
+
+    def test_over_5pct_keep(self):
+        # 15 outliers in 200 rows (7.5%) — above 5% → keep (natural distribution)
+        assert _outlier_strategy(15, 200) == "keep"

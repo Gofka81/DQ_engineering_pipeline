@@ -114,6 +114,22 @@ Organised by topic. Each entry includes: source, URL, and the decision it suppor
 - The outlier treatment options (winsorise, remove, cap, keep) in docs/recommendations.md
 - The distinction between statistical outliers and domain validity violations (age = -1 is invalid, not an outlier)
 
+### Outlier Treatment Strategy Selection — Heuristic Thresholds
+
+**Source:** Practitioner guides on winsorization and outlier prevalence as a signal for treatment choice.
+
+- [How to Identify Outliers in Your Data — Statistics By Jim](https://statisticsbyjim.com/basics/outliers/)
+- [How to Find Outliers — Statistics By Jim](https://statisticsbyjim.com/basics/find-outliers/)
+- [Winsorization — DataCamp Data Prep guide](https://www.datacamp.com/tutorial/how-to-use-the-winsorize-function-in-python)
+- [IQR Outlier Detection — Analytics Vidhya](https://www.analyticsvidhya.com/blog/2022/10/outliers-detection-using-iqr-z-score-lof-and-dbscan/)
+- [Dealing with Outliers Using the Z-score Method — KDnuggets](https://www.kdnuggets.com/2017/02/removing-outliers-standard-deviation-python.html)
+
+**Key finding:** No academic standard specifies numeric thresholds (e.g. "remove if <1%") for outlier treatment selection. The thresholds used in `_outlier_strategy()` (<1% → remove, 1–5% → winsorise, >5% → keep) are grounded in general practitioner guidance: small counts at extreme bounds are typical of data entry errors (favour removal), moderate prevalence warrants capping to preserve rows (winsorise), and high prevalence suggests a naturally heavy-tailed distribution (keep). These thresholds are disclosed as project heuristics, not a formal statistical rule.
+
+**Supports:**
+- Engineering Decision #71 — outlier strategy heuristic thresholds and the hybrid code-heuristic + LLM domain note design
+- `_outlier_strategy()` in `dq_logic.py`
+
 ---
 
 ## 4. Duplicate Detection

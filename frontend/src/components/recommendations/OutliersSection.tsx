@@ -33,31 +33,40 @@ export function OutliersSection({ outliers, onChange }: Props) {
               <th className="pb-2 text-left">Strategy</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100 dark:divide-zinc-700">
+          <tbody>
             {entries.map(([col, cfg]) => (
-              <tr key={col}>
-                <td className="py-2 font-mono text-gray-800 dark:text-zinc-200">{col}</td>
-                <td className="py-2 text-gray-600 dark:text-zinc-400">{cfg.count ?? "—"}</td>
-                <td className="py-2 text-gray-600 dark:text-zinc-400">
-                  {cfg.lower !== null && cfg.upper !== null
-                    ? `${cfg.lower?.toLocaleString()} – ${cfg.upper?.toLocaleString()}`
-                    : "—"}
-                </td>
-                <td className="py-2">
-                  <select
-                    value={cfg.strategy}
-                    onChange={(e) => onChange(col, e.target.value as OutliersConfig["strategy"])}
-                    className="text-sm border border-gray-300 dark:border-zinc-600 rounded px-1 py-0.5 bg-white dark:bg-zinc-800 dark:text-zinc-100"
-                  >
-                    {["keep", "winsorise", "remove", "cap"].map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                  <span className="ml-1.5 text-xs text-zinc-400 dark:text-zinc-500">
-                    {outlierImpactLabel(cfg)}
-                  </span>
-                </td>
-              </tr>
+              <>
+                <tr key={col} className="border-t border-gray-100 dark:border-zinc-700">
+                  <td className="py-2 font-mono text-gray-800 dark:text-zinc-200">{col}</td>
+                  <td className="py-2 text-gray-600 dark:text-zinc-400">{cfg.count ?? "—"}</td>
+                  <td className="py-2 text-gray-600 dark:text-zinc-400">
+                    {cfg.lower !== null && cfg.upper !== null
+                      ? `${cfg.lower?.toLocaleString()} – ${cfg.upper?.toLocaleString()}`
+                      : "—"}
+                  </td>
+                  <td className="py-2">
+                    <select
+                      value={cfg.strategy}
+                      onChange={(e) => onChange(col, e.target.value as OutliersConfig["strategy"])}
+                      className="text-sm border border-gray-300 dark:border-zinc-600 rounded px-1 py-0.5 bg-white dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      {["keep", "winsorise", "remove", "cap"].map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                    <span className="ml-1.5 text-xs text-zinc-400 dark:text-zinc-500">
+                      {outlierImpactLabel(cfg)}
+                    </span>
+                  </td>
+                </tr>
+                {cfg.note && (
+                  <tr key={`${col}-note`}>
+                    <td colSpan={4} className="pb-2 pt-0">
+                      <p className="text-xs text-gray-500 dark:text-zinc-400 italic pl-0.5">{cfg.note}</p>
+                    </td>
+                  </tr>
+                )}
+              </>
             ))}
           </tbody>
         </table>

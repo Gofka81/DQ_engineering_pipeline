@@ -577,19 +577,29 @@ def build_recommendations(df: pd.DataFrame, profile: dict[str, Any], dq_score: f
 
     # --- Outliers ---
     # Only numeric columns with detected outliers get an entry.
-    # Default strategy is "keep" — user can change to winsorise/remove/cap.
+    # Strategy is selected by _outlier_strategy() heuristic — deterministic code rule.
+    # "note" is null here; LLM enrichment will populate it with domain reasoning.
     for col, cp in column_profiles.items():
         if cp.get("detected_type") != "numeric":
             continue
         outlier_info = cp.get("outliers", {})
-        if outlier_info.get("count", 0) > 0:
+        count = outlier_info.get("count", 0)
+        if count > 0:
+            strategy = _outlier_strategy(count, profile["total_rows"])
             recommendations["outliers"][col] = {
-                "strategy": "keep",
+                "strategy": strategy,
                 "method": "iqr",
-                "count": outlier_info["count"],
+                "count": count,
                 "lower": outlier_info.get("lower"),
                 "upper": outlier_info.get("upper"),
+                "note": None,
             }
+            if strategy != "keep" and col in recommendations["columns"]:
+                pct = round(count / profile["total_rows"] * 100, 1)
+                recommendations["columns"][col]["warnings"].append(
+                    f"'{col}' has {count} outlier(s) ({pct}% of rows) — "
+                    f"strategy '{strategy}' auto-selected; verify these are not legitimate extremes before confirming."
+                )
 
     # --- Duplicates ---
     if profile["duplicate_rows"] > 0:
@@ -1106,6 +1116,26 @@ def _fill_strategy(detected_type: str, col_profile: dict) -> str:
     if col_profile.get("cardinality_pct", 100) < 10:
         return "mode"
     return "drop_row"
+
+
+def _outlier_strategy(outlier_count: int, total_rows: int) -> str:
+    """
+    Pick a default outlier treatment strategy based on dataset size and prevalence.
+
+    Rules (deterministic, no LLM):
+        total_rows < 100        → "winsorise"  (small dataset: can't afford to remove rows)
+        outlier_pct < 1%        → "remove"     (negligible loss, likely data entry errors)
+        1% ≤ outlier_pct ≤ 5%  → "winsorise"  (moderate: cap extremes, preserve rows)
+        outlier_pct > 5%        → "keep"       (likely natural heavy-tailed distribution)
+    """
+    if total_rows < 100:
+        return "winsorise"
+    outlier_pct = outlier_count / total_rows
+    if outlier_pct < 0.01:
+        return "remove"
+    if outlier_pct <= 0.05:
+        return "winsorise"
+    return "keep"
 
 
 def _calculate_validity(

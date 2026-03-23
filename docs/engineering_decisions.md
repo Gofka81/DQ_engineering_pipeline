@@ -78,6 +78,8 @@ This document captures every significant architectural and technical decision ma
 67. [COMPLETED State Tab Design — Mirrors AWAITING_REVIEW](#67-completed-state-tab-design--mirrors-awaiting_review)
 68. [DataPreviewTable — Bidirectional Scroll + Sticky Header](#68-datapreviewtable--bidirectional-scroll--sticky-header)
 69. [Drop-Impact Bitsets — Precomputed at Analysis Time](#69-drop-impact-bitsets--precomputed-at-analysis-time)
+70. [Extract Shared Flow Utilities to `flows/common.py`](#70-extract-shared-flow-utilities-to-flowscommonpy)
+71. [Outlier Strategy Heuristic + LLM Domain Note](#71-outlier-strategy-heuristic--llm-domain-note)
 
 ---
 
@@ -1744,3 +1746,43 @@ Numeric/date columns get `stats`. String/bool columns get `unique_count`, `cardi
 **Non-critical soft fail:** If `build_dropmasks` or `upload_dropmasks` fails for any reason (the operation is not in the critical path of the DQ flow), the run still completes normally. The frontend `getDropImpact` call catches errors silently — the impact summary is informational and the AWAITING_REVIEW page is fully usable without it.
 
 **Frontend integration:** `RecommendationsEditor` calls `getDropImpact` with a 300ms debounce whenever the recommendations state changes. The response (`DropImpactResponse`) includes exact row counts for null drops, outlier removes, and deduplication. This fulfils the FC1 requirement from `docs/todo.md` without the simulate-endpoint round-trip approach.
+
+---
+
+## 71. Outlier Strategy Heuristic + LLM Domain Note
+
+**Decision:** Replace the hardcoded `"keep"` default for every detected outlier with a statistical heuristic that selects `"remove"`, `"winsorise"`, or `"keep"` based on outlier prevalence and dataset size. In parallel, the LLM is given the proposed strategy and IQR bounds and is required to add a domain reasoning `note` to each outlier entry — explaining whether the outliers are likely errors or legitimate extremes and whether the heuristic strategy seems appropriate. The LLM cannot change the strategy (read-only field); it can only add a note. The user sees both and can override.
+
+**Context:** F4 item — "LLM reasoning for outlier strategy" was listed as a future improvement. All detected outliers previously defaulted to `strategy: "keep"` with no guidance, leaving the user to figure out the right treatment without context.
+
+**Heuristic thresholds (sources: Statistics By Jim, DataCamp winsorization guide, Analytics Vidhya IQR method guide):**
+- `total_rows < 100` → `"winsorise"`: small datasets cannot afford to lose rows; capping extremes is safer than removal
+- `outlier_pct < 1%` → `"remove"`: negligible data loss; small counts at extreme bounds are typically data entry errors
+- `1% ≤ outlier_pct ≤ 5%` → `"winsorise"`: moderate prevalence; capping preserves rows while removing the distortion
+- `outlier_pct > 5%` → `"keep"`: high prevalence suggests a natural heavy-tailed distribution (salary, sensor readings, transaction amounts), not errors
+
+**Why hybrid (code heuristic + LLM note) rather than LLM-only strategy:**
+- LLM-only: non-deterministic, untestable, hallucination risk — if the LLM picks "remove" on a salary column with executive outliers, real data is lost silently
+- Code-only: heuristic is transparent and reproducible but cannot reason about domain semantics ("is 5 outliers in 200 rows in an HR dataset entry errors or C-suite salaries?")
+- Hybrid: code selects a statistically grounded default that the LLM can then annotate with domain reasoning; user sees both and makes the final call
+
+**LLM receives:** IQR bounds (`outlier_lower`, `outlier_upper`) added to the numeric profile table; outlier section (strategy, count, lower, upper) included in the lean baseline. LLM returns `outliers[col].note` only — strategy/count/lower/upper are stripped by the merge guard even if hallucinated.
+
+**Column warning added for non-"keep" strategies:** When `strategy != "keep"`, a warning is appended to the column's `warnings` list so the user sees the impact in the Recommendations editor before approving.
+
+**Schema change:** `outliers[col]` gains `"note": null` (LLM-populated) and the static `"strategy"` is now heuristic-selected instead of always `"keep"`. The `OutliersConfig` TypeScript interface gains `note?: string | null`. The frontend `OutliersSection` renders a message-bubble icon with a `title` tooltip when note is non-null.
+
+---
+
+## 70. Extract Shared Flow Utilities to `flows/common.py`
+
+**Decision:** Moved `_publish_status`, `update_run_status` (Prefect task), and `_setup_file_logger` out of `dq_flow.py` and `transform_flow.py` into a new `prefect/flows/common.py` module. Both flows import from `common.py`. Each flow retains a local one-line `_flog()` helper (returns the flow-specific named logger) since the logger name differs between flows (`dq_run.<id>` vs `transform_run.<id>`).
+
+**Context:** During a dead-code audit, ~110 lines of identical utility code were found copy-pasted across both flow files. The `_publish_status` function and `update_run_status` task were byte-for-byte identical. `_setup_file_logger` differed only in the log filename prefix (`dq_` vs `transform_`).
+
+**Options considered:**
+- Leave as-is — simple but any fix to one requires fixing the other
+- Extract to `common.py` — single source of truth, tested once
+- Merge into `clients.py` — wrong abstraction; `clients.py` is for infrastructure factories, not Prefect tasks
+
+**Why `common.py`:** Dedicated module keeps the separation clear — `clients.py` is for infra clients, `common.py` is for shared Prefect flow logic. `setup_file_logger` is parameterised with a `prefix` argument (`"dq"` or `"transform"`) so the log filename and logger name remain flow-specific without duplicating the function body.

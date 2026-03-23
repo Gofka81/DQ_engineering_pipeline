@@ -36,16 +36,23 @@ Before deciding on each column, briefly reason about its semantics:
 - High-null event-date or optional-attribute columns (adv_evt_dt, incident_dt, resolved_at, notes) — nulls are by design → prefer leave_null
 - Sample rows: spot sentinel strings ("N/A", "unknown", "none") — these are validity issues tracked in invalid count, NOT nulls; always verify null_pct > 0 before recommending any missing_values strategy
 
-Output a JSON object with a single "columns" key. Include only columns you \
-are improving. Within each column include only the keys you are changing.
+Output a JSON object with "columns" and/or "outliers" keys. Include only \
+columns you are improving, and only outlier entries for columns with detected \
+outliers in the baseline. Within each column include only the keys you are \
+changing.
 
 {{
-  "columns": {{
+  "columns": {{                                         (optional — only columns you are improving)
     "<col>": {{
       "type": "int|float|string|date|bool",            (optional — only if changing)
       "missing_values": {{"strategy": "median|mean|mode|fill|drop_row|drop_column|leave_null", "value": null}} or null,  (optional — only if changing)
       "transform_hint": "imperative action sentence citing actual values",   (optional — only when sample rows show a concrete value-level issue)
       "note": "one sentence explaining the semantic reasoning"               (required for every column you include)
+    }}
+  }},
+  "outliers": {{                                        (optional — only for columns with detected outliers in the baseline)
+    "<col>": {{
+      "note": "one or two sentence domain analysis"    (required for every outlier column you include)
     }}
   }}
 }}
@@ -64,6 +71,18 @@ Rules:
 - transform_hint: only valid for string-type columns — numeric, date, and bool columns are already correctly typed so there is no string formatting to fix; numeric range anomalies are handled by the outliers section. For string columns, add when sample rows show a concrete per-cell value-level issue that type-casting alone cannot fix. Two conditions must BOTH be true: (1) evidence is visible in the sample rows — cite the actual values you see, (2) the fix is a per-cell operation (regex, arithmetic, string split) that does not require knowing other rows. Write a single imperative sentence. Examples: "strip '%%' suffix from values like '12%%', '0.5%%' and divide by 100"; "extract numeric part from '180cm', '5ft9in' and convert all to cm"; "strip non-numeric characters from '~50', '100 approx' and cast to float"; "split 'New York, NY' pattern on ', ' into city and state".
 - format inconsistency (MANDATORY): if a column's warnings list contains a message about "mixed value formats" or "not numeric-castable", you MUST add transform_hint for that column — do not skip it. The non-castable examples shown in the warning (e.g. '$1,200', 'N/A', 'TBD') tell you exactly what format to handle. Not adding transform_hint for a format-inconsistency column is an error.
 - note is required for every column you include, but do NOT include a column solely to add a note — a note is only valid when you are also changing type, missing_values, or transform_hint
+- outlier notes: for every column in the outliers section of the baseline, you MUST return an \
+  outliers entry with a "note". Reason specifically about that column — do NOT use generic \
+  phrases like "likely measurement errors" as a default. Address three things: \
+  (1) plausibility of the IQR bounds — if a lower bound is negative for a quantity that cannot \
+  be negative by definition, flag it; if the upper bound truncates values that are domain-normal \
+  at extremes, say so; \
+  (2) whether the outlier count and prevalence suggest systematic noise, a heavy-tailed \
+  distribution, or genuine entry errors — cite the count and bounds; \
+  (3) whether the suggested strategy is appropriate, and if not, which alternative fits better \
+  and why. If the suggested strategy is already optimal given your reasoning, say why rather than \
+  recommending a change. Do NOT include "strategy", "count", "lower", or "upper" in outlier \
+  entries — those are read-only.
 - Output ONLY the JSON object — no markdown fences, no commentary\
 """
 
@@ -247,13 +266,18 @@ def _build_llm_profile(profile: dict[str, Any], df: pd.DataFrame) -> str:
 
     # 2. Numeric columns table
     if numeric:
-        lines.append("name,type,null_pct,mean,median,std,min,max,outliers")
+        lines.append("name,type,null_pct,mean,median,std,min,max,outliers,outlier_lower,outlier_upper")
         for col, cp in numeric.items():
             s = cp.get("stats", {})
+            out = cp.get("outliers", {})
+            out_count = out.get("count", 0)
+            out_lower = _fmt(out.get("lower")) if out_count > 0 else ""
+            out_upper = _fmt(out.get("upper")) if out_count > 0 else ""
             lines.append(
                 f"{col},{cp['detected_type']},{_fmt(cp['null_pct'])},"
                 f"{_fmt(s.get('mean'))},{_fmt(s.get('median'))},{_fmt(s.get('std'))},"
-                f"{_fmt(s.get('min'))},{_fmt(s.get('max'))},{cp['outliers']['count']}"
+                f"{_fmt(s.get('min'))},{_fmt(s.get('max'))},{out_count},"
+                f"{out_lower},{out_upper}"
             )
         lines.append("")
 
@@ -287,8 +311,9 @@ def _lean_baseline(recs: dict[str, Any]) -> dict[str, Any]:
     """
     Build a sparse version of the baseline recommendations for the LLM prompt.
 
-    Only the "columns" top-level key is included — the LLM does not touch
-    duplicates, outliers, custom_transforms, or _metadata.
+    The "columns" and "outliers" top-level keys are included — the LLM uses
+    both to enrich column strategies and add domain notes to outlier entries.
+    _eda, _metadata, duplicates, custom_transforms are excluded.
 
     Per-column fields at their default value are omitted:
       nullable       → omitted when False
@@ -298,11 +323,11 @@ def _lean_baseline(recs: dict[str, Any]) -> dict[str, Any]:
       rename_to      → always omitted (LLM-set, always None in baseline)
       note           → always omitted (LLM-set, always None in baseline)
 
+    Outlier entries include strategy/count/bounds only (note is LLM-set).
+
     Also switches to compact JSON (no indent) — caller passes the result
     to json.dumps with separators=(",",":").
     """
-    # Only "columns" is returned — _eda, _metadata, duplicates, outliers are
-    # all excluded by construction and must never reach the LLM context.
     columns: dict[str, Any] = {}
     for col, col_def in recs.get("columns", {}).items():
         lean: dict[str, Any] = {"type": col_def["type"]}
@@ -327,6 +352,17 @@ def _lean_baseline(recs: dict[str, Any]) -> dict[str, Any]:
 
         columns[col] = lean
 
+    outliers: dict[str, Any] = {}
+    for col, od in recs.get("outliers", {}).items():
+        outliers[col] = {
+            "strategy": od["strategy"],
+            "count": od["count"],
+            "lower": od.get("lower"),
+            "upper": od.get("upper"),
+        }
+
+    if outliers:
+        return {"columns": columns, "outliers": outliers}
     return {"columns": columns}
 
 
@@ -406,12 +442,17 @@ _VALID_TYPES = {"int", "float", "string", "date", "bool"}
 _VALID_STRATEGIES = {"median", "mean", "mode", "fill", "drop_row", "drop_column", "leave_null"}
 
 
-def validate_llm_output(data: dict[str, Any], known_columns: set[str]) -> tuple[bool, str]:
+def validate_llm_output(
+        data: dict[str, Any],
+        known_columns: set[str],
+        known_outlier_columns: set[str] = frozenset(),
+) -> tuple[bool, str]:
     """
     Structural validation of the LLM partial diff.
 
-    Expects {"columns": {<col>: {<only changed keys>}}} — only changed columns,
-    only changed keys within each column.
+    Accepts {"columns": {...}, "outliers": {...}} — at least one key required.
+    Only changed columns/outlier entries are expected; only changed keys within
+    each column.
 
     Collects ALL errors before returning so the retry prompt gets the full
     picture in one shot rather than one error at a time.
@@ -421,55 +462,78 @@ def validate_llm_output(data: dict[str, Any], known_columns: set[str]) -> tuple[
     """
     errors: list[str] = []
 
-    if "columns" not in data:
-        # Nothing else to validate without columns
-        return False, "Missing required key: 'columns'"
+    has_columns = "columns" in data
+    has_outliers = "outliers" in data
 
-    columns = data["columns"]
-    if not isinstance(columns, dict):
-        return False, "'columns' must be a dict"
+    if not has_columns and not has_outliers:
+        return False, "Response must contain at least one of 'columns' or 'outliers'"
 
-    for col, col_def in columns.items():
-        if col not in known_columns:
-            errors.append(f"columns['{col}'] — unknown column (not in dataset)")
-            continue  # skip further checks for this col, name is wrong
+    if has_columns:
+        columns = data["columns"]
+        if not isinstance(columns, dict):
+            return False, "'columns' must be a dict"
 
-        if not isinstance(col_def, dict):
-            errors.append(f"columns['{col}'] must be a dict")
-            continue
+        for col, col_def in columns.items():
+            if col not in known_columns:
+                errors.append(f"columns['{col}'] — unknown column (not in dataset)")
+                continue  # skip further checks for this col, name is wrong
 
-        if not col_def.get("note"):
-            errors.append(f"columns['{col}'] missing 'note' — required for every changed column")
+            if not isinstance(col_def, dict):
+                errors.append(f"columns['{col}'] must be a dict")
+                continue
 
-        if "type" in col_def and col_def["type"] not in _VALID_TYPES:
-            errors.append(
-                f"columns['{col}'].type='{col_def['type']}' invalid; "
-                f"must be one of {sorted(_VALID_TYPES)}"
-            )
+            if not col_def.get("note"):
+                errors.append(f"columns['{col}'] missing 'note' — required for every changed column")
 
-        mv = col_def.get("missing_values")
-        if mv is not None:
-            if not isinstance(mv, dict):
-                errors.append(f"columns['{col}'].missing_values must be a dict or null")
-            else:
-                strategy = mv.get("strategy")
-                if strategy not in _VALID_STRATEGIES:
-                    errors.append(
-                        f"columns['{col}'].missing_values.strategy='{strategy}' invalid; "
-                        f"must be one of {sorted(_VALID_STRATEGIES)}"
-                    )
-                if strategy == "fill" and mv.get("value") is None:
-                    errors.append(
-                        f"columns['{col}'].missing_values strategy='fill' "
-                        f"but 'value' is null — provide a non-null fill value"
-                    )
-
-        if "transform_hint" in col_def:
-            th = col_def["transform_hint"]
-            if not isinstance(th, str) or not th.strip():
+            if "type" in col_def and col_def["type"] not in _VALID_TYPES:
                 errors.append(
-                    f"columns['{col}'].transform_hint must be a non-empty string"
+                    f"columns['{col}'].type='{col_def['type']}' invalid; "
+                    f"must be one of {sorted(_VALID_TYPES)}"
                 )
+
+            mv = col_def.get("missing_values")
+            if mv is not None:
+                if not isinstance(mv, dict):
+                    errors.append(f"columns['{col}'].missing_values must be a dict or null")
+                else:
+                    strategy = mv.get("strategy")
+                    if strategy not in _VALID_STRATEGIES:
+                        errors.append(
+                            f"columns['{col}'].missing_values.strategy='{strategy}' invalid; "
+                            f"must be one of {sorted(_VALID_STRATEGIES)}"
+                        )
+                    if strategy == "fill" and mv.get("value") is None:
+                        errors.append(
+                            f"columns['{col}'].missing_values strategy='fill' "
+                            f"but 'value' is null — provide a non-null fill value"
+                        )
+
+            if "transform_hint" in col_def:
+                th = col_def["transform_hint"]
+                if not isinstance(th, str) or not th.strip():
+                    errors.append(
+                        f"columns['{col}'].transform_hint must be a non-empty string"
+                    )
+
+    if has_outliers:
+        outliers_section = data["outliers"]
+        if not isinstance(outliers_section, dict):
+            errors.append("'outliers' must be a dict")
+        else:
+            for col, outlier_def in outliers_section.items():
+                if col not in known_outlier_columns:
+                    errors.append(f"outliers['{col}'] — not a known outlier column")
+                    continue
+                if not isinstance(outlier_def, dict):
+                    errors.append(f"outliers['{col}'] must be a dict")
+                    continue
+                if not outlier_def.get("note"):
+                    errors.append(f"outliers['{col}'] missing 'note' — required")
+                for forbidden in ("strategy", "count", "lower", "upper"):
+                    if forbidden in outlier_def:
+                        errors.append(
+                            f"outliers['{col}'] must not contain '{forbidden}' — read-only field"
+                        )
 
     if errors:
         return False, "\n".join(f"- {e}" for e in errors)
@@ -649,12 +713,16 @@ def enrich_recommendations(
             validation_error = f"JSONDecodeError: {e}"
             continue
 
-        valid, err = validate_llm_output(llm_diff, known_columns)
+        known_outlier_columns = set(base_recommendations.get("outliers", {}).keys())
+        valid, err = validate_llm_output(llm_diff, known_columns, known_outlier_columns)
         if not valid:
             logger.warning(f"Runner attempt {attempt + 1} failed validation: {err}")
             previous_output = raw
             validation_error = err
             continue
+
+        # Ensure "columns" key is always present for the processing loops below
+        llm_diff.setdefault("columns", {})
 
         # Strip keys that are identical to the baseline (LLM sometimes echoes unchanged keys)
         for col, col_diff in llm_diff["columns"].items():
@@ -718,6 +786,20 @@ def enrich_recommendations(
                 if "missing_values" in col_diff:
                     enriched["columns"][col]["warnings"] = []
 
+        # Merge outlier notes from LLM (only "note" is accepted — strategy/count/bounds are read-only)
+        for col, outlier_diff in llm_diff.get("outliers", {}).items():
+            if col in enriched["outliers"]:
+                note = outlier_diff.get("note")
+                if note:
+                    # Guard: strip self-referential "consider X instead of X" suffix produced
+                    # when the heuristic strategy already matches what the LLM would suggest.
+                    strategy = enriched["outliers"][col]["strategy"]
+                    tautology = f"consider '{strategy}' instead of '{strategy}'"
+                    if tautology in note:
+                        note = note[:note.index(tautology)].rstrip(" —–-")
+                    if note:
+                        enriched["outliers"][col]["note"] = note
+
         # Apply renames from dedicated rename call
         renames = _rename_runner(client, df, profile)
         for col, new_name in renames.items():
@@ -725,9 +807,10 @@ def enrich_recommendations(
                 enriched["columns"][col]["rename_to"] = new_name
 
         n_changed = len(llm_diff["columns"])
+        n_outlier_notes = sum(1 for od in llm_diff.get("outliers", {}).values() if od.get("note"))
         logger.info(
-            "LLM enrichment succeeded on attempt %d. columns_changed=%d renames=%d",
-            attempt + 1, n_changed, len(renames),
+            "LLM enrichment succeeded on attempt %d. columns_changed=%d outlier_notes=%d renames=%d",
+            attempt + 1, n_changed, n_outlier_notes, len(renames),
         )
 
         # Log each override so it's easy to see what the LLM actually changed.

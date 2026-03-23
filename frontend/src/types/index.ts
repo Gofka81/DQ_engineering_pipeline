@@ -56,6 +56,7 @@ export interface OutliersConfig {
   lower: number | null
   upper: number | null
   count?: number
+  note?: string | null
 }
 
 export interface EDAHistogram {
