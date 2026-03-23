@@ -15,6 +15,7 @@ from backend.app.db.models.run import RunStatus
 class MissingValuesFill(BaseModel):
     strategy: Literal["median", "mean", "mode", "fill", "drop_row", "drop_column", "leave_null"]
     value: str | int | float | None = None  # required when strategy == "fill"
+    null_count: int | None = None  # number of null/invalid cells in this column (informational)
 
     @model_validator(mode="after")
     def value_required_for_fill(self) -> "MissingValuesFill":
@@ -31,7 +32,8 @@ class ColumnConfig(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     note: str | None = None
     rename_to: str | None = None
-    sentinel_values: list[float] | None = None
+    sentinel_values: list[float | str] | None = None
+    replace_sentinels: bool = True
     transform_hint: str | None = None
     transform_code: str | None = None
 
@@ -71,6 +73,8 @@ class RecommendationsSchema(BaseModel):
     custom_transforms: list[dict[str, Any]] = Field(default_factory=list)
     # _metadata is pass-through
     metadata_: dict[str, Any] = Field(default_factory=dict, alias="_metadata")
+    # _eda is display-only — stored in DB but never read by apply_recommendations() or the LLM
+    eda_: dict[str, Any] | None = Field(default=None, alias="_eda")
 
     model_config = {"populate_by_name": True}
 
@@ -164,3 +168,28 @@ class DownloadResponse(BaseModel):
     run_id: UUID
     download_url: str
     expires_in_hours: int = 1
+
+
+class DropImpactRequest(BaseModel):
+    null_strategies: dict[str, str]    # col → strategy (e.g. "drop_row")
+    outlier_strategies: dict[str, str] # col → strategy (e.g. "remove")
+    duplicates_strategy: str           # "drop" | "ignore"
+
+
+class DropImpactBreakdown(BaseModel):
+    null_drops: int
+    outlier_drops: int
+    duplicate_drops: int
+    overlap_saved: int
+
+
+class DropImpactResponse(BaseModel):
+    rows_before: int
+    rows_dropped: int
+    rows_after: int
+    breakdown: DropImpactBreakdown
+
+
+class DataPreviewResponse(BaseModel):
+    columns: list[str]
+    rows: list[list[Any]]  # outer = rows, inner = cell values; None for NaN

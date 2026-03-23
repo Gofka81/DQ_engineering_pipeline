@@ -5,6 +5,17 @@ interface Props {
   onChange: (col: string, strategy: OutliersConfig["strategy"]) => void
 }
 
+function outlierImpactLabel(o: OutliersConfig): string {
+  const n = o.count ?? 0
+  switch (o.strategy) {
+    case "winsorise": return `${n} → winsorize [${o.lower}–${o.upper}]`
+    case "cap":       return `${n} → cap to [${o.lower}–${o.upper}]`
+    case "remove":    return `${n} → remove rows`
+    case "keep":      return `${n} outliers kept`
+    default:          return `${n} outliers`
+  }
+}
+
 export function OutliersSection({ outliers, onChange }: Props) {
   const entries = Object.entries(outliers)
   if (entries.length === 0) return null
@@ -42,6 +53,9 @@ export function OutliersSection({ outliers, onChange }: Props) {
                       <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
+                  <span className="ml-1.5 text-xs text-zinc-400 dark:text-zinc-500">
+                    {outlierImpactLabel(cfg)}
+                  </span>
                 </td>
               </tr>
             ))}

@@ -1,4 +1,6 @@
-import type { DQScores, RunOut, RunStatus } from "../../types"
+import { useState, useRef, useCallback, useEffect } from "react"
+import type { DataPreview, DQScores, Recommendations, RunOut, RunStatus } from "../../types"
+import { submitRecommendations } from "../../api/files"
 
 const ISSUE_LABELS: Record<string, string> = {
   missing: "Missing values",
@@ -102,9 +104,12 @@ function IssuesGrid({
 }
 import { RunHeader } from "./RunHeader"
 import { RecsViewer } from "./RecsViewer"
+import { DataPreviewTable } from "./DataPreviewTable"
 import { ScoreComparison } from "../scores/ScoreComparison"
 import { RecommendationsEditor } from "../recommendations/RecommendationsEditor"
-import { getDownloadUrl } from "../../api/runs"
+import { SubmitBar } from "../recommendations/SubmitBar"
+import { EDADashboard } from "../eda/EDADashboard"
+import { getDownloadUrl, getRunPreview } from "../../api/runs"
 
 interface Props {
   runData: RunOut
@@ -132,6 +137,52 @@ export function RunDetailView({
   const dqBefore = liveDqScoresBefore !== undefined ? liveDqScoresBefore : runData.dq_scores_before
   const dqAfter = liveDqScoresAfter !== undefined ? liveDqScoresAfter : runData.dq_scores_after
   const errorMessage = liveErrorMessage !== undefined ? liveErrorMessage : runData.error_message
+  const [activeTab, setActiveTab] = useState<"profile" | "recommendations" | "preview">("recommendations")
+  const [completedTab, setCompletedTab] = useState<"recommendations" | "profile" | "preview">("recommendations")
+
+  const [previewData, setPreviewData] = useState<DataPreview | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+
+  useEffect(() => {
+    setPreviewLoading(true)
+    getRunPreview(runData.id)
+      .then(setPreviewData)
+      .catch(() => {})
+      .finally(() => setPreviewLoading(false))
+  }, [runData.id])
+
+  const [cleanedPreview, setCleanedPreview] = useState<DataPreview | null>(null)
+
+  useEffect(() => {
+    if (status === "COMPLETED") {
+      getRunPreview(runData.id, "cleaned").then(setCleanedPreview).catch(() => {})
+    }
+  }, [runData.id, status])
+
+  const recsRef = useRef<Recommendations | null>(runData.recommendations_generated ?? null)
+  const [submitLoading, setSubmitLoading] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+
+  const handleRecsChange = useCallback((recs: Recommendations) => {
+    recsRef.current = recs
+  }, [])
+
+  async function handleSubmit() {
+    if (!recsRef.current) return
+    setSubmitLoading(true)
+    setSubmitError(null)
+    try {
+      await submitRecommendations(runData.file_id, recsRef.current)
+      onRecommendationsSubmitted?.()
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Submit failed"
+      setSubmitError(msg)
+    } finally {
+      setSubmitLoading(false)
+    }
+  }
 
   async function handleDownload() {
     const res = await getDownloadUrl(runData.id)
@@ -139,7 +190,7 @@ export function RunDetailView({
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0">
       <RunHeader
         runId={runData.id}
         filename={filename}
@@ -169,57 +220,143 @@ export function RunDetailView({
           </div>
         )}
 
-        {/* AWAITING_REVIEW — interactive editor */}
-        {status === "AWAITING_REVIEW" && runData.recommendations_generated && (
-          <RecommendationsEditor
-            fileId={runData.file_id}
-            initialRecs={runData.recommendations_generated}
-            dqScoresBefore={dqBefore}
-            onSubmitted={onRecommendationsSubmitted ?? (() => {})}
-          />
-        )}
-        {status === "AWAITING_REVIEW" && !runData.recommendations_generated && (
-          <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-8 flex items-center gap-3 text-blue-600">
-            <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
-            </svg>
-            <span className="text-sm">Loading recommendations…</span>
-          </div>
+        {/* AWAITING_REVIEW — tab switcher: Data Profile | Recommendations | Data Preview */}
+        {status === "AWAITING_REVIEW" && (
+          <>
+            <div className="flex gap-1 bg-gray-100 dark:bg-zinc-800 rounded-lg p-1 w-fit">
+              {(["recommendations", "profile", "preview"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-4 py-1.5 text-sm rounded-md transition-colors ${
+                    activeTab === tab
+                      ? "bg-white dark:bg-zinc-700 text-gray-800 dark:text-zinc-100 shadow-sm font-medium"
+                      : "text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-300"
+                  }`}
+                >
+                  {tab === "profile" ? "Data Profile" : tab === "recommendations" ? "Recommendations" : "Data Preview"}
+                </button>
+              ))}
+            </div>
+
+            {runData.recommendations_generated ? (
+              <>
+                {activeTab === "profile" && dqBefore && runData.recommendations_generated._eda && (
+                  <EDADashboard
+                    eda={runData.recommendations_generated._eda}
+                    dqScores={dqBefore}
+                    outliers={runData.recommendations_generated.outliers}
+                  />
+                )}
+                {activeTab === "profile" && (!dqBefore || !runData.recommendations_generated._eda) && (
+                  <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-8 text-center text-sm text-gray-400 dark:text-zinc-500">
+                    Profile data not available — re-upload the file to generate it.
+                  </div>
+                )}
+                {activeTab === "recommendations" && (
+                  <RecommendationsEditor
+                    runId={runData.id}
+                    initialRecs={runData.recommendations_generated}
+                    dqScoresBefore={dqBefore}
+                    onRecsChange={handleRecsChange}
+                  />
+                )}
+                {activeTab === "preview" && (
+                  <DataPreviewTable
+                    data={previewData}
+                    loading={previewLoading}
+                    totalRows={dqBefore?.total_rows ?? undefined}
+                  />
+                )}
+              </>
+            ) : (
+              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-8 flex items-center gap-3 text-blue-600">
+                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
+                </svg>
+                <span className="text-sm">Loading recommendations…</span>
+              </div>
+            )}
+          </>
         )}
 
-        {/* COMPLETED — scores + issues */}
-        {status === "COMPLETED" && dqBefore && (
+        {/* COMPLETED — tabbed view */}
+        {status === "COMPLETED" && (
           <>
-            <h2 className="text-sm font-semibold text-gray-600 dark:text-zinc-400 uppercase tracking-wide -mb-2">Statistics</h2>
-            <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-6 flex gap-6">
-              <div className="flex-1 min-w-0">
-                <ScoreComparison before={dqBefore} after={dqAfter ?? undefined} />
-              </div>
-              {dqBefore?.issues_found && (
-                <div className="w-px bg-gray-100 dark:bg-zinc-700 flex-shrink-0" />
-              )}
-              {dqBefore?.issues_found && (
-                <div className="flex-1 min-w-0">
-                  <IssuesGrid
-                    before={dqBefore.issues_found}
-                    after={dqAfter?.issues_found}
-                    statsBefore={dqBefore}
-                    statsAfter={dqAfter ?? undefined}
-                  />
-                </div>
-              )}
+            <div className="flex gap-1 bg-gray-100 dark:bg-zinc-800 rounded-lg p-1 w-fit">
+              {(["recommendations", "profile", "preview"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setCompletedTab(tab)}
+                  className={`px-4 py-1.5 text-sm rounded-md transition-colors ${
+                    completedTab === tab
+                      ? "bg-white dark:bg-zinc-700 text-gray-800 dark:text-zinc-100 shadow-sm font-medium"
+                      : "text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-300"
+                  }`}
+                >
+                  {tab === "profile" ? "Data Profile" : tab === "recommendations" ? "Recommendations" : "Data Preview"}
+                </button>
+              ))}
             </div>
-            <div className="flex gap-3">
-              {onUploadNew && (
+
+            {completedTab === "recommendations" && (
+              (runData.recommendations_generated || runData.recommendations_approved) ? (
+                <RecsViewer
+                  generated={runData.recommendations_generated}
+                  applied={runData.recommendations_approved}
+                />
+              ) : (
+                <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-8 text-center text-sm text-gray-400 dark:text-zinc-500">
+                  No recommendations available.
+                </div>
+              )
+            )}
+
+            {completedTab === "profile" && dqBefore && (
+              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-6 flex gap-6">
+                <div className="flex-1 min-w-0">
+                  <ScoreComparison before={dqBefore} after={dqAfter ?? undefined} />
+                </div>
+                {dqBefore?.issues_found && (
+                  <div className="w-px bg-gray-100 dark:bg-zinc-700 flex-shrink-0" />
+                )}
+                {dqBefore?.issues_found && (
+                  <div className="flex-1 min-w-0">
+                    <IssuesGrid
+                      before={dqBefore.issues_found}
+                      after={dqAfter?.issues_found}
+                      statsBefore={dqBefore}
+                      statsAfter={dqAfter ?? undefined}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+            {completedTab === "profile" && !dqBefore && (
+              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-8 text-center text-sm text-gray-400 dark:text-zinc-500">
+                Profile data not available.
+              </div>
+            )}
+
+            {completedTab === "preview" && (
+              <DataPreviewTable
+                data={cleanedPreview}
+                loading={cleanedPreview === null}
+                totalRows={dqAfter?.total_rows ?? dqBefore?.total_rows ?? undefined}
+              />
+            )}
+
+            {onUploadNew && (
+              <div className="flex gap-3">
                 <button
                   onClick={onUploadNew}
                   className="px-4 py-2 text-sm border border-gray-300 dark:border-zinc-600 rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800 dark:text-zinc-300 transition-colors"
                 >
                   Upload new file
                 </button>
-              )}
-            </div>
+              </div>
+            )}
           </>
         )}
 
@@ -239,19 +376,24 @@ export function RunDetailView({
           </div>
         )}
 
-        {/* Recommendations viewer — always show for completed or past runs */}
-        {(status === "COMPLETED" || (status !== "PENDING" && status !== "ANALYZING" && status !== "AWAITING_REVIEW" && status !== "TRANSFORMING")) && (
-          (runData.recommendations_generated || runData.recommendations_approved) && (
-            <div>
-              <h2 className="text-sm font-semibold text-gray-600 dark:text-zinc-400 mb-2 uppercase tracking-wide">Recommendations</h2>
-              <RecsViewer
-                generated={runData.recommendations_generated}
-                applied={runData.recommendations_approved}
-              />
-            </div>
-          )
+        {/* Recommendations viewer — FAILED runs only */}
+        {status === "FAILED" && (runData.recommendations_generated || runData.recommendations_approved) && (
+          <div>
+            <h2 className="text-sm font-semibold text-gray-600 dark:text-zinc-400 mb-2 uppercase tracking-wide">Recommendations</h2>
+            <RecsViewer
+              generated={runData.recommendations_generated}
+              applied={runData.recommendations_approved}
+            />
+          </div>
         )}
       </div>
+
+      {status === "AWAITING_REVIEW" && activeTab === "recommendations" && runData.recommendations_generated && (
+        <>
+          {submitError && <p className="text-red-500 text-sm px-6 py-1">{submitError}</p>}
+          <SubmitBar onSubmit={handleSubmit} loading={submitLoading} />
+        </>
+      )}
     </div>
   )
 }

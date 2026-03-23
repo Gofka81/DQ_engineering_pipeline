@@ -11,7 +11,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "llama-3.3-70b-versatile"
+_MODEL_ENRICHMENT = "llama-3.3-70b-versatile"
+_MODEL_RENAME     = "llama-3.3-70b-versatile"
+_MODEL_TRANSFORM  = "llama-3.3-70b-versatile"
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -31,7 +33,6 @@ explicit default, not missing information.
 Before deciding on each column, briefly reason about its semantics:
 - ID/key columns (high cardinality, names like *_id, *_key, *_code) — drop_row for nulls, never impute
 - Pattern columns (email, phone, UUID, URL) — values cannot be invented or imputed; never use fill/mode/mean; choose drop_row if the row is useless without this field, leave_null if the row is still useful (e.g. a CRM contact without a phone number is still a valid contact)
-- Abbreviated column names — scan EVERY column for abbreviated tokens and add rename_to to ALL of them; do not skip any, even when also making other changes to that column
 - High-null event-date or optional-attribute columns (adv_evt_dt, incident_dt, resolved_at, notes) — nulls are by design → prefer leave_null
 - Sample rows: spot sentinel strings ("N/A", "unknown", "none") — these are validity issues tracked in invalid count, NOT nulls; always verify null_pct > 0 before recommending any missing_values strategy
 
@@ -43,7 +44,6 @@ are improving. Within each column include only the keys you are changing.
     "<col>": {{
       "type": "int|float|string|date|bool",            (optional — only if changing)
       "missing_values": {{"strategy": "median|mean|mode|fill|drop_row|drop_column|leave_null", "value": null}} or null,  (optional — only if changing)
-      "rename_to": "clearer_name",                      (optional — only for abbreviated/cryptic names)
       "transform_hint": "imperative action sentence citing actual values",   (optional — only when sample rows show a concrete value-level issue)
       "note": "one sentence explaining the semantic reasoning"               (required for every column you include)
     }}
@@ -59,10 +59,11 @@ Rules:
 - strategy "fill" requires "value" to be non-null
 - leave_null: use when nulls are intentional — appropriate for event-date or optional-attribute columns where null means "not applicable"
 - drop_column: use only when a column is >50% missing AND the column has no domain significance
-- rename_to: scan ALL columns for abbreviated names — the column name alone determines this (no sample rows needed); adding rename_to is mandatory for every abbreviated column, not optional; rename_to + note alone is a valid complete entry. Suffix expansions are unambiguous and must always be applied: _cd→_code, _nm→_name, _dt→_date, _ts→_timestamp, _pct→_percent, _amt→_amount, _qty→_quantity, _flg→_flag, _src→_source, _typ→_type, _stg→_stage, _scr→_score, _pt→_point, _mgr→_manager, _num→_number, _val→_value, _yrs→_years, _cnt→_count, _mthd→_method, _prot→_protocol, _cat→_category. For abbreviated prefixes (e.g. txn_, ord_, acct_, cmpny_) use your domain knowledge to expand them to full words and combine with the suffix expansion. Never rename _id or _key suffix columns. Leave well-known domain acronyms unchanged: bmi, sku, uuid, url, api, sql.
+- rename_to: do not use — column renaming is handled separately
 - missing_values: only recommend if null_pct > 0 — sentinel strings like "N/A" or "unknown" in sample rows are validity issues (tracked in invalid count), not nulls; never add missing_values for a column with null_pct = 0
 - transform_hint: only valid for string-type columns — numeric, date, and bool columns are already correctly typed so there is no string formatting to fix; numeric range anomalies are handled by the outliers section. For string columns, add when sample rows show a concrete per-cell value-level issue that type-casting alone cannot fix. Two conditions must BOTH be true: (1) evidence is visible in the sample rows — cite the actual values you see, (2) the fix is a per-cell operation (regex, arithmetic, string split) that does not require knowing other rows. Write a single imperative sentence. Examples: "strip '%%' suffix from values like '12%%', '0.5%%' and divide by 100"; "extract numeric part from '180cm', '5ft9in' and convert all to cm"; "strip non-numeric characters from '~50', '100 approx' and cast to float"; "split 'New York, NY' pattern on ', ' into city and state".
-- note is required for every column you include, but do NOT include a column solely to add a note — a note is only valid when you are also changing type, missing_values, rename_to, or transform_hint
+- format inconsistency (MANDATORY): if a column's warnings list contains a message about "mixed value formats" or "not numeric-castable", you MUST add transform_hint for that column — do not skip it. The non-castable examples shown in the warning (e.g. '$1,200', 'N/A', 'TBD') tell you exactly what format to handle. Not adding transform_hint for a format-inconsistency column is an error.
+- note is required for every column you include, but do NOT include a column solely to add a note — a note is only valid when you are also changing type, missing_values, or transform_hint
 - Output ONLY the JSON object — no markdown fences, no commentary\
 """
 
@@ -104,6 +105,31 @@ That output failed validation with this error:
 </validation_error>
 
 Fix the error and return only the columns you want to improve.\
+"""
+
+_RENAME_SYSTEM = """\
+You are a senior data engineer reviewing column names for clarity.
+For each column you are given its name, detected type, and sample values from the actual data.
+Rename columns so they are immediately clear to anyone reading the schema.
+
+Rename a column only if BOTH conditions are true:
+1. The name contains abbreviations or is cryptic
+2. The actual sample values CONFIRM the implied meaning
+   (e.g. a _dt column should actually contain date-like values, not codes or IDs)
+
+When renaming, you may only expand abbreviations — never drop parts of the name.
+Examples: brand_cd → brand_code; pat_id → patient_id; cmpny_nm → company_name
+
+Well-known domain acronyms that should NOT be expanded: sku, uuid, url, api, sql, ip, atm.
+Use your domain knowledge for everything else — if the sample values make sense for the implied meaning, rename it.
+
+Before consider any column names try to reason about dataset domain and use this domain knowledge for column renaming.
+If you are uncertain what a column represents, considering BOTH its name and its values in the context
+of the other columns in this dataset, do not rename it. A wrong name is worse than an opaque one.
+
+Return a JSON object: {"old_column_name": "new_name", ...}
+Only include columns you are actually renaming. Return {} if no renames needed.
+Output ONLY the JSON object — no markdown fences, no commentary.\
 """
 
 
@@ -275,6 +301,8 @@ def _lean_baseline(recs: dict[str, Any]) -> dict[str, Any]:
     Also switches to compact JSON (no indent) — caller passes the result
     to json.dumps with separators=(",",":").
     """
+    # Only "columns" is returned — _eda, _metadata, duplicates, outliers are
+    # all excluded by construction and must never reach the LLM context.
     columns: dict[str, Any] = {}
     for col, col_def in recs.get("columns", {}).items():
         lean: dict[str, Any] = {"type": col_def["type"]}
@@ -343,11 +371,11 @@ def _runner(
     max_tokens = min(512 + len(base_recs.get("columns", {})) * 30, 2048)
     logger.info(
         "LLM enrichment request | model=%s max_tokens=%d attempt=%d prompt_chars=%d",
-        _MODEL, max_tokens, attempt + 1, len(user_content),
+        _MODEL_ENRICHMENT, max_tokens, attempt + 1, len(user_content),
     )
     t0 = time.time()
     response = client.chat.completions.create(
-        model=_MODEL,
+        model=_MODEL_ENRICHMENT,
         max_tokens=max_tokens,
         temperature=0,
         messages=[
@@ -436,16 +464,6 @@ def validate_llm_output(data: dict[str, Any], known_columns: set[str]) -> tuple[
                         f"but 'value' is null — provide a non-null fill value"
                     )
 
-        if "rename_to" in col_def:
-            rt = col_def["rename_to"]
-            if not isinstance(rt, str):
-                errors.append(f"columns['{col}'].rename_to must be a string")
-            elif not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", rt):
-                errors.append(
-                    f"columns['{col}'].rename_to='{rt}' is not a valid identifier "
-                    f"(use snake_case, no spaces or hyphens)"
-                )
-
         if "transform_hint" in col_def:
             th = col_def["transform_hint"]
             if not isinstance(th, str) or not th.strip():
@@ -456,6 +474,100 @@ def validate_llm_output(data: dict[str, Any], known_columns: set[str]) -> tuple[
     if errors:
         return False, "\n".join(f"- {e}" for e in errors)
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Rename runner (separate LLM call)
+# ---------------------------------------------------------------------------
+
+def _rename_runner(
+        client,
+        df: pd.DataFrame,
+        profile: dict[str, Any],
+) -> dict[str, str]:
+    """
+    Separate LLM call for column renaming.
+
+    Builds per-column input: "col (type): val1, val2, val3"
+    Returns {old_col: new_name} — only columns that should be renamed.
+    Empty dict on any failure (soft fail — never raises).
+    """
+    known_columns = set(profile["column_profiles"].keys())
+
+    lines = []
+    for col, cp in profile["column_profiles"].items():
+        if col not in df.columns:
+            continue
+        col_type = cp.get("detected_type", "string")
+        vals = df[col].dropna().head(3).astype(str).tolist()
+        val_str = ", ".join(vals) if vals else "(no values)"
+        lines.append(f"{col} ({col_type}): {val_str}")
+
+    if not lines:
+        return {}
+
+    user_content = "\n".join(lines)
+    max_tokens = min(128 + len(known_columns) * 15, 512)
+
+    logger.info("LLM rename request | model=%s columns=%d", _MODEL_RENAME, len(lines))
+    try:
+        t0 = time.time()
+        response = client.chat.completions.create(
+            model=_MODEL_RENAME,
+            max_tokens=max_tokens,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": _RENAME_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        elapsed = time.time() - t0
+        raw = response.choices[0].message.content.strip()
+        usage = response.usage
+        logger.info(
+            "LLM rename response | elapsed=%.2fs tokens_in=%d tokens_out=%d",
+            elapsed,
+            usage.prompt_tokens if usage else -1,
+            usage.completion_tokens if usage else -1,
+        )
+    except Exception as e:
+        logger.warning("LLM rename call failed: %s — skipping renames", e)
+        return {}
+
+    # Strip markdown fences if present
+    clean = raw
+    if clean.startswith("```"):
+        fence_lines = clean.splitlines()
+        fence_lines = fence_lines[1:] if fence_lines else fence_lines
+        if fence_lines and fence_lines[-1].strip() == "```":
+            fence_lines = fence_lines[:-1]
+        clean = "\n".join(fence_lines).strip()
+
+    try:
+        result = json.loads(clean)
+    except json.JSONDecodeError as e:
+        logger.warning("LLM rename returned invalid JSON: %s — skipping renames", e)
+        return {}
+
+    if not isinstance(result, dict):
+        logger.warning("LLM rename returned non-dict — skipping renames")
+        return {}
+
+    validated: dict[str, str] = {}
+    for old_name, new_name in result.items():
+        if old_name not in known_columns:
+            logger.warning("LLM rename: unknown column '%s' — skipping", old_name)
+            continue
+        if not isinstance(new_name, str) or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", new_name):
+            logger.warning("LLM rename: invalid identifier '%s' for '%s' — skipping", new_name, old_name)
+            continue
+        if old_name == new_name:
+            logger.debug("LLM rename: skipping identity rename '%s'", old_name)
+            continue
+        validated[old_name] = new_name
+        logger.info("LLM rename | %s → %s", old_name, new_name)
+
+    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -572,36 +684,50 @@ def enrich_recommendations(
                     logger.debug("Protected leave_null for '%s' — MAR-detected, LLM cannot override", col)
                     del col_diff["missing_values"]
 
-        # Strip no-op renames (rename_to identical to the column name).
-        for col, col_diff in llm_diff["columns"].items():
-            if col_diff.get("rename_to") == col:
-                logger.debug("Stripped no-op rename_to for '%s'", col)
-                del col_diff["rename_to"]
-
         # Drop columns where only a note remains (note without a real change is noise)
         # and columns where nothing changed at all.
         # transform_hint is substantive — a column with only transform_hint + note is kept.
-        _SUBSTANTIVE_KEYS = {"type", "nullable", "missing_values", "rename_to", "transform_hint"}
+        _SUBSTANTIVE_KEYS = {"type", "nullable", "missing_values", "transform_hint"}
         llm_diff["columns"] = {
             col: col_diff
             for col, col_diff in llm_diff["columns"].items()
             if col_diff and (set(col_diff.keys()) & _SUBSTANTIVE_KEYS)
         }
 
+        # --- Separate rename call (split approach) ---
+        # Strip any stray rename_to the strategy call produced (model sometimes ignores the rule)
+        for col_diff in llm_diff["columns"].values():
+            col_diff.pop("rename_to", None)
+
         # Deep merge: baseline + LLM diff (only changed cols/keys)
         enriched = copy.deepcopy(base_recommendations)
         for col, col_diff in llm_diff["columns"].items():
             if col in enriched["columns"]:
-                enriched["columns"][col].update(col_diff)
+                for key, val in col_diff.items():
+                    if (
+                        key == "missing_values"
+                        and val is not None
+                        and isinstance(enriched["columns"][col].get("missing_values"), dict)
+                    ):
+                        # Merge sub-keys so null_count (and other baseline fields) survive
+                        enriched["columns"][col]["missing_values"].update(val)
+                    else:
+                        enriched["columns"][col][key] = val
                 # Clear stale warnings when LLM changed the strategy — the old warnings
                 # were generated for the baseline strategy and are now contradictory.
                 if "missing_values" in col_diff:
                     enriched["columns"][col]["warnings"] = []
 
+        # Apply renames from dedicated rename call
+        renames = _rename_runner(client, df, profile)
+        for col, new_name in renames.items():
+            if col in enriched["columns"]:
+                enriched["columns"][col]["rename_to"] = new_name
+
         n_changed = len(llm_diff["columns"])
         logger.info(
-            f"LLM enrichment succeeded on attempt {attempt + 1}. "
-            f"columns_changed={n_changed}"
+            "LLM enrichment succeeded on attempt %d. columns_changed=%d renames=%d",
+            attempt + 1, n_changed, len(renames),
         )
 
         # Log each override so it's easy to see what the LLM actually changed.
@@ -839,7 +965,7 @@ def generate_transform_code(
             try:
                 t0 = time.time()
                 response = client.chat.completions.create(
-                    model=_MODEL,
+                    model=_MODEL_TRANSFORM,
                     max_tokens=128,
                     temperature=0,
                     messages=[

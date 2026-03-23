@@ -1642,38 +1642,66 @@ class TestCountSentinels:
 
     def test_na_string_detected(self):
         s = series(["Alice", "N/A", "Bob", "unknown", "Carol"])
-        assert _count_sentinels(s) == 2
+        count, values = _count_sentinels(s)
+        assert count == 2
 
     def test_case_insensitive(self):
         s = series(["NULL", "None", "UNKNOWN", "Missing", "valid"])
-        assert _count_sentinels(s) == 4
+        count, _ = _count_sentinels(s)
+        assert count == 4
 
     def test_dash_and_question_mark(self):
         s = series(["-", "?", "real_value"])
-        assert _count_sentinels(s) == 2
+        count, _ = _count_sentinels(s)
+        assert count == 2
 
     def test_clean_data_returns_zero(self):
         s = series(["Alice", "Bob", "Charlie"])
-        assert _count_sentinels(s) == 0
+        count, values = _count_sentinels(s)
+        assert count == 0
+        assert values == []
 
     def test_empty_series_returns_zero(self):
         s = series([])
-        assert _count_sentinels(s) == 0
+        count, values = _count_sentinels(s)
+        assert count == 0
+        assert values == []
 
     def test_all_null_returns_zero(self):
         s = series([None, None, None])
-        assert _count_sentinels(s) == 0
+        count, values = _count_sentinels(s)
+        assert count == 0
+        assert values == []
 
     def test_whitespace_stripped(self):
         # "  N/A  " should still be detected after strip
         s = series(["  N/A  ", "  unknown  ", "real"])
-        assert _count_sentinels(s) == 2
+        count, _ = _count_sentinels(s)
+        assert count == 2
 
-    def test_profile_string_column_includes_sentinel_count(self):
+    def test_returns_original_casing_values(self):
+        # Values stored in original casing so df.replace() hits actual stored values
+        s = series(["Alice", "N/A", "Bob", "Unknown"])
+        count, values = _count_sentinels(s)
+        assert count == 2
+        assert "N/A" in values
+        assert "Unknown" in values
+
+    def test_unique_values_deduplicated(self):
+        # Same sentinel appearing multiple times → only one entry in values list
+        s = series(["N/A", "N/A", "N/A", "real"])
+        count, values = _count_sentinels(s)
+        assert count == 3
+        assert values == ["N/A"]
+
+    def test_profile_string_column_includes_sentinel_count_and_values(self):
         s = series(["Alice", "N/A", "Bob", "unknown"])
         profile = _profile_string_column(s)
         assert "sentinel_count" in profile
         assert profile["sentinel_count"] == 2
+        assert "sentinel_values" in profile
+        assert "N/A" in profile["sentinel_values"]
+        assert "unknown" in profile["sentinel_values"]
 
 
 # ===========================================================================
@@ -1862,3 +1890,77 @@ class TestSentinelValuesEndToEnd:
         }
         result = apply_recommendations(df, recs)
         assert result["salary"].isna().sum() == 0
+
+    def test_string_sentinels_replaced_in_step_0(self):
+        # String column with N/A and unknown — both should become NaN, then be filled.
+        df = pd.DataFrame({"status": ["active", "N/A", "inactive", "unknown", "active"]})
+        recs = {
+            "columns": {
+                "status": {
+                    "type": "string",
+                    "nullable": True,
+                    "missing_values": {"strategy": "mode", "value": None},
+                    "normalize": False,
+                    "warnings": [],
+                    "note": None,
+                    "sentinel_values": ["N/A", "unknown"],
+                    "replace_sentinels": True,
+                }
+            },
+            "duplicates": {},
+            "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert "N/A" not in result["status"].values
+        assert "unknown" not in result["status"].values
+        assert result["status"].isna().sum() == 0  # filled by mode
+
+    def test_replace_sentinels_false_preserves_values(self):
+        # User set replace_sentinels: False — sentinel values must survive untouched.
+        df = pd.DataFrame({"status": ["active", "N/A", "inactive", "unknown"]})
+        recs = {
+            "columns": {
+                "status": {
+                    "type": "string",
+                    "nullable": False,
+                    "missing_values": None,
+                    "normalize": False,
+                    "warnings": [],
+                    "note": None,
+                    "sentinel_values": ["N/A", "unknown"],
+                    "replace_sentinels": False,
+                }
+            },
+            "duplicates": {},
+            "custom_transforms": [],
+        }
+        result = apply_recommendations(df, recs)
+        assert "N/A" in result["status"].values
+        assert "unknown" in result["status"].values
+
+    def test_build_recommendations_string_sentinels_in_sentinel_values(self):
+        # String column with N/A values — sentinel_values should contain the string values.
+        df = pd.DataFrame({"status": ["active", "N/A", "inactive", "unknown", "active"]})
+        profile = profile_dataframe(df)
+        recs = build_recommendations(df, profile, 90.0)
+        col = recs["columns"]["status"]
+        assert col["sentinel_values"] is not None
+        assert "N/A" in col["sentinel_values"]
+        assert "unknown" in col["sentinel_values"]
+
+    def test_build_recommendations_adds_replace_sentinels_flag(self):
+        # When sentinel_values is non-null, replace_sentinels: True must be in column rec.
+        df = pd.DataFrame({"status": ["active", "N/A", "inactive", "unknown", "active"]})
+        profile = profile_dataframe(df)
+        recs = build_recommendations(df, profile, 90.0)
+        col = recs["columns"]["status"]
+        assert col.get("replace_sentinels") is True
+
+    def test_build_recommendations_no_replace_sentinels_when_no_sentinels(self):
+        # Clean column — replace_sentinels key should be absent (not default True).
+        df = pd.DataFrame({"status": ["active", "inactive", "pending"]})
+        profile = profile_dataframe(df)
+        recs = build_recommendations(df, profile, 100.0)
+        col = recs["columns"]["status"]
+        assert col.get("sentinel_values") is None
+        assert "replace_sentinels" not in col

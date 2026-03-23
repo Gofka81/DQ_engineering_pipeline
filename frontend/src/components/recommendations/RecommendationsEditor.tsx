@@ -1,22 +1,23 @@
-import { useState, useCallback } from "react"
-import type { ColumnConfig, DQScores, DuplicatesConfig, OutliersConfig, Recommendations } from "../../types"
+import { useState, useCallback, useEffect, useRef } from "react"
+import type { ColumnConfig, DQScores, DropImpactResponse, DuplicatesConfig, OutliersConfig, Recommendations } from "../../types"
 import { ColumnsTable } from "./ColumnsTable"
 import { DuplicatesSection } from "./DuplicatesSection"
 import { OutliersSection } from "./OutliersSection"
-import { SubmitBar } from "./SubmitBar"
-import { submitRecommendations } from "../../api/files"
+import { getDropImpact } from "../../api/runs"
 
 interface Props {
-  fileId: string
+  runId: string
   initialRecs: Recommendations
   dqScoresBefore: DQScores | null
-  onSubmitted: () => void
+  onRecsChange: (recs: Recommendations) => void
 }
 
-export function RecommendationsEditor({ fileId, initialRecs, dqScoresBefore, onSubmitted }: Props) {
+export function RecommendationsEditor({ runId, initialRecs, dqScoresBefore, onRecsChange }: Props) {
   const [recs, setRecs] = useState<Recommendations>(() => structuredClone(initialRecs))
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [impact, setImpact] = useState<DropImpactResponse | null>(null)
+  const onRecsChangeRef = useRef(onRecsChange)
+  useEffect(() => { onRecsChangeRef.current = onRecsChange })
+  useEffect(() => { onRecsChangeRef.current(recs) }, [recs])
 
   const updateColumn = useCallback((name: string, patch: Partial<ColumnConfig>) => {
     setRecs((prev) => ({
@@ -54,21 +55,27 @@ export function RecommendationsEditor({ fileId, initialRecs, dqScoresBefore, onS
     }))
   }, [])
 
-  async function handleSubmit() {
-    setLoading(true)
-    setError(null)
-    try {
-      await submitRecommendations(fileId, recs)
-      onSubmitted()
-    } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        "Submit failed"
-      setError(msg)
-    } finally {
-      setLoading(false)
-    }
-  }
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      try {
+        const result = await getDropImpact(runId, {
+          null_strategies: Object.fromEntries(
+            Object.entries(recs.columns)
+              .filter(([, c]) => c.missing_values)
+              .map(([k, c]) => [k, c.missing_values!.strategy])
+          ),
+          outlier_strategies: Object.fromEntries(
+            Object.entries(recs.outliers ?? {}).map(([k, v]) => [k, v.strategy])
+          ),
+          duplicates_strategy: recs.duplicates?.strategy ?? "ignore",
+        })
+        setImpact(result)
+      } catch {
+        // silently ignore — feature is informational
+      }
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [recs, runId])
 
   const issues = initialRecs._metadata?.issues_found ?? {}
 
@@ -121,6 +128,16 @@ export function RecommendationsEditor({ fileId, initialRecs, dqScoresBefore, onS
             {issues.format_inconsistencies} format issues
           </span>
         )}
+        {impact && (
+          <span className="bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 rounded px-2 py-1 font-semibold">
+            Net: {impact.rows_after.toLocaleString()} / {impact.rows_before.toLocaleString()} rows
+            {impact.breakdown.overlap_saved > 0 && (
+              <span className="font-normal ml-1 opacity-75">
+                ({impact.breakdown.overlap_saved} overlap saved)
+              </span>
+            )}
+          </span>
+        )}
       </div>
 
       <section>
@@ -132,10 +149,6 @@ export function RecommendationsEditor({ fileId, initialRecs, dqScoresBefore, onS
         <DuplicatesSection config={recs.duplicates} onChange={updateDuplicates} />
         <OutliersSection outliers={recs.outliers} onChange={updateOutlierStrategy} />
       </div>
-
-      {error && <p className="text-red-500 text-sm">{error}</p>}
-
-      <SubmitBar onSubmit={handleSubmit} loading={loading} />
     </div>
   )
 }

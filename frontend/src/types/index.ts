@@ -9,6 +9,25 @@ export type RunStatus =
 export interface MissingValuesFill {
   strategy: "median" | "mean" | "mode" | "fill" | "drop_row" | "drop_column" | "leave_null"
   value?: string | number | null
+  null_count?: number
+}
+
+export interface DropImpactRequest {
+  null_strategies: Record<string, string>
+  outlier_strategies: Record<string, string>
+  duplicates_strategy: string
+}
+
+export interface DropImpactResponse {
+  rows_before: number
+  rows_dropped: number
+  rows_after: number
+  breakdown: {
+    null_drops: number
+    outlier_drops: number
+    duplicate_drops: number
+    overlap_saved: number
+  }
 }
 
 export interface ColumnConfig {
@@ -19,7 +38,8 @@ export interface ColumnConfig {
   warnings: string[]
   note: string | null
   rename_to: string | null
-  sentinel_values: number[] | null
+  sentinel_values: (number | string)[] | null
+  replace_sentinels?: boolean
   transform_hint?: string | null
   transform_code?: string | null
 }
@@ -38,6 +58,48 @@ export interface OutliersConfig {
   count?: number
 }
 
+export interface EDAHistogram {
+  counts: number[]  // 10 bin counts
+  edges: number[]   // 11 bin edges
+}
+
+export interface EDAStats {
+  min: number | string
+  max: number | string
+  mean?: number
+  median?: number
+  std?: number
+  q1?: number
+  q3?: number
+  histogram?: EDAHistogram
+}
+
+export interface EDAColumnNumeric {
+  detected_type: "numeric" | "date"
+  null_count: number
+  null_pct: number
+  stats: EDAStats
+}
+
+export interface EDAColumnCategorical {
+  detected_type: "string" | "bool"
+  null_count: number
+  null_pct: number
+  unique_count: number
+  cardinality_pct: number
+  top_values: Record<string, number>
+  pattern: string | null
+}
+
+export type EDAColumn = EDAColumnNumeric | EDAColumnCategorical
+
+export interface EDAProfile {
+  total_rows: number
+  total_columns: number
+  duplicate_rows: number
+  columns: Record<string, EDAColumn>
+}
+
 export interface Recommendations {
   columns: Record<string, ColumnConfig>
   duplicates: DuplicatesConfig | null
@@ -48,6 +110,7 @@ export interface Recommendations {
     dq_score: number
     issues_found: Record<string, number>
   }
+  _eda?: EDAProfile
 }
 
 export interface DQScores {
@@ -129,4 +192,9 @@ export interface DownloadResponse {
   run_id: string
   download_url: string
   expires_in_hours: number
+}
+
+export interface DataPreview {
+  columns: string[]
+  rows: (string | number | boolean | null)[][]
 }

@@ -4,110 +4,25 @@ DQ Analysis Prefect flow — task definitions and flow orchestration only.
 Business logic lives in flows/dq_logic.py.
 Client factories live in clients.py.
 """
+import io
 import json
 import logging
-import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import redis as redis_sync
 from minio.error import S3Error
 from prefect import flow, task
 from prefect.logging import get_run_logger
 
 from clients import get_minio_client, get_minio_raw_bucket, get_pg_conn
-from flows.dq_logic import build_recommendations, count_issues_from_profile, parse_csv, profile_dataframe, score_profile, score_profile_detailed
-from flows.llm_enrichment import enrich_recommendations, generate_transform_code
-
-
-# ---------------------------------------------------------------------------
-# File logger — writes to /logs/dq_<filename>_<timestamp>.log
-# ---------------------------------------------------------------------------
-
-def _setup_file_logger(run_id: str, filename: str) -> tuple[logging.Logger, Path]:
-    logs_dir = Path("/logs")
-    logs_dir.mkdir(exist_ok=True)
-
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
-    log_path = logs_dir / f"dq_{filename}_{ts}.log"
-
-    log_name = f"dq_run.{run_id}"
-    log = logging.getLogger(log_name)
-    log.setLevel(logging.DEBUG)
-    log.handlers.clear()
-    log.propagate = False
-
-    fmt = logging.Formatter(
-        "%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    log.addHandler(fh)
-
-    # Share handler with dq_logic and llm_enrichment so their logs land in the same file
-    for module in ("flows.dq_logic", "flows.llm_enrichment"):
-        mod_log = logging.getLogger(module)
-        mod_log.setLevel(logging.DEBUG)
-        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path)
-                   for h in mod_log.handlers):
-            mod_log.addHandler(fh)
-
-    return log, log_path
+from flows.common import publish_status as _publish_status, setup_file_logger, update_run_status
+from flows.dq_logic import build_dropmasks, build_recommendations, count_issues_from_profile, parse_csv, profile_dataframe, score_profile, score_profile_detailed
+from flows.llm_enrichment import enrich_recommendations
 
 
 def _flog(run_id: str) -> logging.Logger:
-    """Return the named file logger for this run."""
     return logging.getLogger(f"dq_run.{run_id}")
-
-
-def _publish_status(run_id: str, payload: dict) -> None:
-    """Publish run status event to Redis Pub/Sub channel (fire-and-forget)."""
-    try:
-        r = redis_sync.Redis(
-            host=os.environ.get("REDIS_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_PORT", "6379")),
-        )
-        r.publish(f"run:{run_id}:status", json.dumps(payload))
-        r.close()
-    except Exception:
-        pass  # SSE is best-effort; never fail the flow
-
-
-@task(retries=3, retry_delay_seconds=5)
-async def update_run_status(run_id: str, status: str, error_message: str = None):
-    """Update run status in PostgreSQL."""
-    logger = get_run_logger()
-    log = _flog(run_id)
-
-    msg = f"Status → {status}" + (f" | error: {error_message}" if error_message else "")
-    logger.info(msg)
-    log.info(f"[status] {msg}")
-
-    conn = await get_pg_conn()
-    try:
-        await conn.execute(
-            """
-            UPDATE runs
-            SET status        = $1::run_status,
-                error_message = $2,
-                completed_at  = CASE
-                                    WHEN $1 IN ('COMPLETED', 'FAILED') THEN NOW()
-                                    ELSE completed_at
-                                END
-            WHERE id = $3::uuid
-            """,
-            status,
-            error_message,
-            run_id,
-        )
-    finally:
-        await conn.close()
-
-    log.debug(f"[status] DB committed: run={run_id} status={status}")
 
 
 @task(retries=3, retry_delay_seconds=5)
@@ -271,42 +186,27 @@ def enrich_with_llm(
     return enriched
 
 
+
 @task
-def generate_transform_codes(
-        recommendations: dict[str, Any],
-        df: pd.DataFrame,
-        run_id: str,
-) -> dict[str, Any]:
-    """
-    For each column with a transform_hint, call LLM 2 to generate a validated
-    pandas lambda (transform_code). Soft failure — columns that fail are skipped.
-
-    Runs in the DQ flow so transform_code is stored with recommendations_generated
-    and the user can review (and edit) the lambda before approving.
-    """
-    logger = get_run_logger()
+def upload_dropmasks(df: pd.DataFrame, profile: dict[str, Any], recs: dict[str, Any], file_id: str, run_id: str) -> None:
+    """Build and upload drop-impact bitsets to MinIO raw bucket."""
     log = _flog(run_id)
-
-    hints = [col for col, cd in recommendations.get("columns", {}).items() if cd.get("transform_hint")]
-    logger.info("Generating transform codes (LLM 2)...")
-    log.info(f"[llm2] {len(hints)} column(s) with transform_hint: {hints}")
-
-    updated = generate_transform_code(recommendations, df)
-
-    codes = [col for col, cd in updated.get("columns", {}).items() if cd.get("transform_code")]
-    n = len(codes)
-    logger.info(f"Transform code generation done: {n} column(s) got transform_code")
-    log.info(f"[llm2] {n}/{len(hints)} columns got transform_code: {codes}")
-    if len(hints) > n:
-        failed = [c for c in hints if c not in codes]
-        log.warning(f"[llm2] no code generated for: {failed}")
-
-    return updated
+    try:
+        dropmasks = build_dropmasks(df, profile, recs)
+        dropmasks_bytes = json.dumps(dropmasks).encode()
+        path = f"{file_id}/dropmasks_{run_id}.json"
+        client = get_minio_client()
+        bucket = get_minio_raw_bucket()
+        client.put_object(bucket, path, io.BytesIO(dropmasks_bytes), len(dropmasks_bytes))
+        log.info(f"[dropmasks] uploaded {len(dropmasks['ops'])} ops to {path}")
+    except Exception as e:
+        # Non-critical — dropmask absence degrades gracefully (endpoint returns 404)
+        log.warning(f"[dropmasks] upload failed (non-fatal): {e}")
 
 
 @task(retries=3, retry_delay_seconds=5)
 async def save_results_to_db(run_id: str, profile: dict[str, Any], recommendations: dict[str, Any]):
-    """Save DQ scores (all 5 dimensions) and recommendations to PostgreSQL."""
+    """Save DQ scores (4 dimensions + overall) and recommendations to PostgreSQL."""
     logger = get_run_logger()
     log = _flog(run_id)
 
@@ -369,7 +269,7 @@ async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str):
         minio_path: Path to file in MinIO raw bucket
     """
     filename = Path(minio_path).stem
-    log, log_path = _setup_file_logger(run_id, filename)
+    log, log_path = setup_file_logger(run_id, filename, "dq")
 
     logger = get_run_logger()
     logger.info(f"Starting DQ Analysis for run_id={run_id}, file_id={file_id}")
@@ -385,7 +285,7 @@ async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str):
         dq_score                 = calculate_dq_score(profile, run_id)
         recommendations          = generate_recommendations(df, profile, dq_score, run_id)
         enriched_recommendations = enrich_with_llm(profile, recommendations, df, run_id)
-        enriched_recommendations = generate_transform_codes(enriched_recommendations, df, run_id)
+        upload_dropmasks(df, profile, enriched_recommendations, file_id, run_id)
 
         await save_results_to_db(run_id, profile, enriched_recommendations)
         await update_run_status(run_id, "AWAITING_REVIEW")
@@ -404,9 +304,3 @@ async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str):
         raise
 
 
-if __name__ == "__main__":
-    dq_analysis_flow(
-        run_id="test-run-id",
-        file_id="test-file-id",
-        minio_path="raw/test.csv",
-    )

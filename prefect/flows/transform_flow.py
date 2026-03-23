@@ -15,108 +15,22 @@ Flow order:
 import io
 import json
 import logging
-import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import redis as redis_sync
 from minio.error import S3Error
 from prefect import flow, task
 from prefect.logging import get_run_logger
 
 from clients import get_minio_client, get_minio_raw_bucket, get_minio_curated_bucket, get_pg_conn
+from flows.common import publish_status as _publish_status, setup_file_logger, update_run_status
 from flows.dq_logic import apply_recommendations, count_issues_from_profile, parse_csv, profile_dataframe, score_profile_detailed
 from flows.llm_enrichment import generate_transform_code
 
 
-# ---------------------------------------------------------------------------
-# File logger — writes to /prefect/logs/transform_<filename>_<timestamp>.log
-# ---------------------------------------------------------------------------
-
-def _setup_file_logger(run_id: str, filename: str) -> tuple[logging.Logger, Path]:
-    logs_dir = Path("/logs")
-    logs_dir.mkdir(exist_ok=True)
-
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
-    log_path = logs_dir / f"transform_{filename}_{ts}.log"
-
-    log_name = f"transform_run.{run_id}"
-    log = logging.getLogger(log_name)
-    log.setLevel(logging.DEBUG)
-    log.handlers.clear()
-    log.propagate = False
-
-    fmt = logging.Formatter(
-        "%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    log.addHandler(fh)
-
-    # Share handler with dq_logic and llm_enrichment so their logs land in the same file
-    for module in ("flows.dq_logic", "flows.llm_enrichment"):
-        mod_log = logging.getLogger(module)
-        mod_log.setLevel(logging.DEBUG)
-        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path)
-                   for h in mod_log.handlers):
-            mod_log.addHandler(fh)
-
-    return log, log_path
-
-
 def _flog(run_id: str) -> logging.Logger:
-    """Return the named file logger for this run (no-op if not yet set up)."""
     return logging.getLogger(f"transform_run.{run_id}")
-
-
-def _publish_status(run_id: str, payload: dict) -> None:
-    """Publish run status event to Redis Pub/Sub channel (fire-and-forget)."""
-    try:
-        r = redis_sync.Redis(
-            host=os.environ.get("REDIS_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_PORT", "6379")),
-        )
-        r.publish(f"run:{run_id}:status", json.dumps(payload))
-        r.close()
-    except Exception:
-        pass  # SSE is best-effort; never fail the flow
-
-
-@task(retries=3, retry_delay_seconds=5)
-async def update_run_status(run_id: str, status: str, error_message: str = None):
-    """Update run status in PostgreSQL."""
-    logger = get_run_logger()
-    log = _flog(run_id)
-
-    msg = f"Status → {status}" + (f" | error: {error_message}" if error_message else "")
-    logger.info(msg)
-    log.info(f"[status] {msg}")
-
-    conn = await get_pg_conn()
-    try:
-        await conn.execute(
-            """
-            UPDATE runs
-            SET status        = $1::run_status,
-                error_message = $2,
-                completed_at  = CASE
-                                    WHEN $1 IN ('COMPLETED', 'FAILED') THEN NOW()
-                                    ELSE completed_at
-                                END
-            WHERE id = $3::uuid
-            """,
-            status,
-            error_message,
-            run_id,
-        )
-    finally:
-        await conn.close()
-
-    log.debug(f"[status] DB committed: run={run_id} status={status}")
 
 
 @task(retries=3, retry_delay_seconds=5)
@@ -224,7 +138,7 @@ async def load_approved_recommendations(run_id: str) -> dict[str, Any]:
 
 
 @task
-def generate_missing_transform_codes(
+def generate_transform_codes(
     recommendations: dict[str, Any],
     df: pd.DataFrame,
     run_id: str,
@@ -241,11 +155,11 @@ def generate_missing_transform_codes(
 
     if not pending:
         log.info("[gen_codes] no pending hints — skipping LLM 2")
-        logger.info("generate_missing_transform_codes: nothing to generate")
+        logger.info("generate_transform_codes: nothing to generate")
         return recommendations
 
     log.info(f"[gen_codes] {len(pending)} column(s) need transform_code:")
-    logger.info(f"generate_missing_transform_codes: generating for {list(pending.keys())}")
+    logger.info(f"generate_transform_codes: generating for {list(pending.keys())}")
     for col, hint in pending.items():
         log.info(f"  [{col}] hint: {hint}")
 
@@ -263,7 +177,7 @@ def generate_missing_transform_codes(
         log.info(f"  [{col}] code: {code}")
     if failed:
         log.warning(f"[gen_codes] no code produced for: {failed}")
-        logger.warning(f"generate_missing_transform_codes: failed for {failed}")
+        logger.warning(f"generate_transform_codes: failed for {failed}")
 
     return updated
 
@@ -421,7 +335,7 @@ async def transform_flow(run_id: str, file_id: str, minio_path: str):
         minio_path: Path to the raw file in MinIO (same path DQ flow used)
     """
     filename = Path(minio_path).stem
-    log, log_path = _setup_file_logger(run_id, filename)
+    log, log_path = setup_file_logger(run_id, filename, "transform")
 
     logger = get_run_logger()
     logger.info(f"Starting Transform for run_id={run_id}, file_id={file_id}")
@@ -434,7 +348,7 @@ async def transform_flow(run_id: str, file_id: str, minio_path: str):
 
         df              = load_dataframe_from_minio(minio_path, run_id)
         recommendations = await load_approved_recommendations(run_id)
-        recommendations = generate_missing_transform_codes(recommendations, df, run_id)
+        recommendations = generate_transform_codes(recommendations, df, run_id)
         cleaned_df      = apply_transform(df, recommendations, run_id)
         curated_path    = upload_cleaned_file(cleaned_df, file_id, run_id)
         dq_scores_after = score_cleaned_data(cleaned_df, run_id, approved_outliers=recommendations.get("outliers"))
@@ -458,9 +372,3 @@ async def transform_flow(run_id: str, file_id: str, minio_path: str):
         raise
 
 
-if __name__ == "__main__":
-    transform_flow(
-        run_id="test-run-id",
-        file_id="test-file-id",
-        minio_path="raw/test.csv",
-    )

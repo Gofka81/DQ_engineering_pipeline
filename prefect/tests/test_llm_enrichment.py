@@ -117,8 +117,8 @@ def _valid_diff():
                 "note": "High cardinality ID column — should never be nullable.",
             },
             "sal": {
-                "rename_to": "salary",
-                "note": "Abbreviated name — renaming to salary for clarity.",
+                "missing_values": {"strategy": "mean", "value": None},
+                "note": "Salary is roughly symmetric — mean is appropriate.",
             },
         }
     }
@@ -256,30 +256,6 @@ class TestValidateLlmOutput:
         assert "fill" in err
         assert "null" in err
 
-    def test_rename_to_must_be_string(self):
-        diff = {"columns": {"sal": {"rename_to": 123, "note": "x"}}}
-        ok, err = validate_llm_output(diff, KNOWN)
-        assert ok is False
-        assert "rename_to" in err
-
-    def test_rename_to_with_space_rejected(self):
-        diff = {"columns": {"sal": {"rename_to": "full name", "note": "x"}}}
-        ok, err = validate_llm_output(diff, KNOWN)
-        assert ok is False
-        assert "full name" in err
-
-    def test_rename_to_with_hyphen_rejected(self):
-        diff = {"columns": {"sal": {"rename_to": "first-name", "note": "x"}}}
-        ok, err = validate_llm_output(diff, KNOWN)
-        assert ok is False
-        assert "first-name" in err
-
-    def test_rename_to_valid_snake_case_accepted(self):
-        diff = {"columns": {"sal": {"rename_to": "annual_salary", "note": "x"}}}
-        ok, err = validate_llm_output(diff, KNOWN)
-        assert ok is True
-        assert err == ""
-
     def test_transform_hint_valid_string_accepted(self):
         diff = {"columns": {"sal": {"transform_hint": "strip '%%' suffix and divide by 100", "note": "x"}}}
         ok, err = validate_llm_output(diff, KNOWN)
@@ -348,7 +324,7 @@ class TestEnrichRecommendations:
 
         # Changed columns have the LLM note
         assert result["columns"]["cust_id"]["note"] is not None
-        assert result["columns"]["sal"]["rename_to"] == "salary"
+        assert result["columns"]["sal"]["missing_values"]["strategy"] == "mean"
         # Unchanged columns still exist and are unmodified
         assert result["columns"]["dept_cd"]["type"] == "string"
         assert result["columns"]["dept_cd"]["note"] is None
@@ -381,7 +357,7 @@ class TestEnrichRecommendations:
 
         # bad_diff failed (type=number invalid), good diff applied — sal type stays from baseline
         assert result["columns"]["sal"]["type"] == "float"
-        assert result["columns"]["sal"]["rename_to"] == "salary"
+        assert result["columns"]["sal"]["missing_values"]["strategy"] == "mean"
 
     def test_markdown_fences_stripped(self, sample_profile, base_recs, sample_df):
         """Runner wraps JSON in ```json ... ``` — should still parse correctly."""
@@ -405,7 +381,7 @@ class TestEnrichRecommendations:
                     result = enrich_recommendations(sample_profile, base_recs, sample_df)
 
         assert mock_runner.call_count == 1
-        assert result["columns"]["sal"]["rename_to"] == "salary"
+        assert result["columns"]["sal"]["missing_values"]["strategy"] == "mean"
 
     def test_transform_hint_merged_onto_baseline(self, sample_profile, base_recs, sample_df):
         """transform_hint set by LLM is merged into the column and stored in result."""
@@ -475,6 +451,47 @@ class TestEnrichRecommendations:
 
         # leave_null must be preserved — LLM override stripped
         assert result["columns"]["sal"]["missing_values"]["strategy"] == "leave_null"
+
+    def test_rename_runner_results_applied(self, sample_profile, base_recs, sample_df):
+        """Renames from _rename_runner are merged into enriched recommendations."""
+        diff = {
+            "columns": {
+                "cust_id": {"nullable": False, "note": "ID column."},
+            }
+        }
+        with patch.dict("os.environ", {"LLM_API_KEY": "sk-test"}):
+            with patch.dict("sys.modules", {"groq": MagicMock()}):
+                with patch("flows.llm_enrichment._runner", return_value=json.dumps(diff)):
+                    with patch(
+                        "flows.llm_enrichment._rename_runner",
+                        return_value={"sal": "salary", "dept_cd": "department_code"},
+                    ):
+                        result = enrich_recommendations(sample_profile, base_recs, sample_df)
+
+        assert result["columns"]["sal"]["rename_to"] == "salary"
+        assert result["columns"]["dept_cd"]["rename_to"] == "department_code"
+        assert result["columns"]["email"].get("rename_to") is None
+
+    def test_stray_rename_to_in_strategy_diff_stripped(self, sample_profile, base_recs, sample_df):
+        """rename_to in the strategy diff is stripped before merge (separate call handles renames)."""
+        diff_with_stray_rename = {
+            "columns": {
+                "sal": {
+                    "rename_to": "salary",
+                    "missing_values": {"strategy": "mean", "value": None},
+                    "note": "Mean appropriate for symmetric salary distribution.",
+                }
+            }
+        }
+        with patch.dict("os.environ", {"LLM_API_KEY": "sk-test"}):
+            with patch.dict("sys.modules", {"groq": MagicMock()}):
+                with patch("flows.llm_enrichment._runner", return_value=json.dumps(diff_with_stray_rename)):
+                    with patch("flows.llm_enrichment._rename_runner", return_value={}):
+                        result = enrich_recommendations(sample_profile, base_recs, sample_df)
+
+        # Strategy change applied, stray rename_to stripped (rename runner returned {})
+        assert result["columns"]["sal"]["missing_values"]["strategy"] == "mean"
+        assert result["columns"]["sal"].get("rename_to") is None
 
 
 # ---------------------------------------------------------------------------

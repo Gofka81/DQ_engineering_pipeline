@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import json
 import uuid
 from io import BytesIO
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
+
+import pandas as pd
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -20,7 +23,11 @@ from backend.app.db.models import File as FileModel, Run, RunStatus
 from backend.app.dependencies import get_current_active_user, get_user_by_username
 from backend.app.schemas.auth import UserOut
 from backend.app.schemas.file import (
+    DataPreviewResponse,
     DownloadResponse,
+    DropImpactBreakdown,
+    DropImpactRequest,
+    DropImpactResponse,
     FileOut,
     FileUploadResponse,
     FileWithLatestRunOut,
@@ -78,20 +85,21 @@ async def upload_file(
             detail="File is empty",
         )
 
-    # Generate unique file ID
-    file_id = str(uuid.uuid4())
+    # Generate one UUID used for both the DB record and the MinIO path prefix
+    file_id = uuid.uuid4()
 
     # Upload to MinIO
     minio_path = minio.upload_file(
-        file_id=file_id,
+        file_id=str(file_id),
         file_data=BytesIO(content),
         file_size=file_size,
         original_filename=file.filename,
         content_type="text/csv",
     )
 
-    # Create file record
+    # Create file record — pass id explicitly so DB and MinIO share the same UUID
     db_file = FileModel(
+        id=file_id,
         user_id=current_user.id,
         original_filename=file.filename,
         minio_raw_path=minio_path,
@@ -99,7 +107,7 @@ async def upload_file(
         content_type="text/csv",
     )
     db.add(db_file)
-    await db.flush()  # Get the file ID
+    await db.flush()
 
     # Create initial run
     db_run = Run(
@@ -587,3 +595,143 @@ async def download_run_result(
         download_url=download_url,
         expires_in_hours=1,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bitset helpers (pure Python — no numpy in backend)
+# ---------------------------------------------------------------------------
+
+def _unpack_b64(b64: str, n_rows: int) -> bytearray:
+    """Decode a base64 packed bitset and mask off pad bits in the last byte."""
+    raw = base64.b64decode(b64)
+    result = bytearray(raw)
+    remainder = n_rows % 8
+    if remainder:
+        result[-1] &= 0xFF ^ ((1 << (8 - remainder)) - 1)
+    return result
+
+
+def _popcount_b64(b64: str, n_rows: int) -> int:
+    return bin(int.from_bytes(_unpack_b64(b64, n_rows), "big")).count("1")
+
+
+def _union_popcount(b64_list: list[str], n_rows: int) -> int:
+    if not b64_list:
+        return 0
+    arrays = [_unpack_b64(b, n_rows) for b in b64_list]
+    union = bytearray(arrays[0])
+    for arr in arrays[1:]:
+        for i in range(len(union)):
+            union[i] |= arr[i]
+    return bin(int.from_bytes(union, "big")).count("1")
+
+
+@runs_router.post("/{run_id}/drop-impact", response_model=DropImpactResponse)
+async def compute_drop_impact(
+    run_id: UUID,
+    body: DropImpactRequest,
+    db: AsyncSession = Depends(get_db),
+    minio: MinioService = Depends(get_minio_service),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """Return row-level drop counts for the given strategy selections, using precomputed bitsets."""
+    result = await db.execute(
+        select(Run)
+        .join(FileModel)
+        .where(Run.id == run_id, FileModel.user_id == current_user.id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    path = f"{run.file_id}/dropmasks_{run_id}.json"
+    try:
+        bio = minio.download_file(path)
+        data = json.loads(bio.read())
+    except HTTPException:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drop masks not available for this run")
+
+    n_rows: int = data["n_rows"]
+    ops: dict[str, str] = data["ops"]
+    op_meta: dict[str, dict] = data["op_meta"]
+
+    active_ops: list[str] = []
+    null_count = 0
+    outlier_count = 0
+    dup_count = 0
+
+    for op_name, meta in op_meta.items():
+        if meta["type"] == "null":
+            col = meta["col"]
+            if body.null_strategies.get(col) == "drop_row":
+                active_ops.append(op_name)
+                null_count += _popcount_b64(ops[op_name], n_rows)
+        elif meta["type"] == "outlier":
+            col = meta["col"]
+            if body.outlier_strategies.get(col) == "remove":
+                active_ops.append(op_name)
+                outlier_count += _popcount_b64(ops[op_name], n_rows)
+        elif meta["type"] == "duplicate":
+            if body.duplicates_strategy == "drop":
+                active_ops.append(op_name)
+                dup_count = _popcount_b64(ops[op_name], n_rows)
+
+    rows_dropped = _union_popcount([ops[k] for k in active_ops], n_rows)
+    individual_sum = null_count + outlier_count + dup_count
+    overlap_saved = max(0, individual_sum - rows_dropped)
+
+    return DropImpactResponse(
+        rows_before=n_rows,
+        rows_dropped=rows_dropped,
+        rows_after=n_rows - rows_dropped,
+        breakdown=DropImpactBreakdown(
+            null_drops=null_count,
+            outlier_drops=outlier_count,
+            duplicate_drops=dup_count,
+            overlap_saved=overlap_saved,
+        ),
+    )
+
+
+@runs_router.get("/{run_id}/preview", response_model=DataPreviewResponse)
+async def get_run_preview(
+    run_id: UUID,
+    stage: Literal["raw", "cleaned"] = Query(default="raw"),
+    db: AsyncSession = Depends(get_db),
+    minio: MinioService = Depends(get_minio_service),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """Return first 20 rows of the raw upload (stage=raw) or the cleaned output (stage=cleaned)."""
+    result = await db.execute(
+        select(Run)
+        .join(FileModel)
+        .where(Run.id == run_id, FileModel.user_id == current_user.id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    if stage == "cleaned":
+        if run.status != RunStatus.COMPLETED or not run.minio_curated_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cleaned file not available yet",
+            )
+        bucket = minio.curated_bucket
+        path = run.minio_curated_path
+    else:
+        file_result = await db.execute(select(FileModel).where(FileModel.id == run.file_id))
+        file = file_result.scalar_one()
+        bucket = minio.raw_bucket
+        path = file.minio_raw_path
+
+    try:
+        response = minio.client.get_object(bucket_name=bucket, object_name=path)
+        df = pd.read_csv(response, nrows=20)
+        response.close()
+        response.release_conn()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview unavailable")
+
+    df = df.where(pd.notna(df), None)
+    return DataPreviewResponse(columns=df.columns.tolist(), rows=df.values.tolist())

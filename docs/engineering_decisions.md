@@ -49,6 +49,9 @@ This document captures every significant architectural and technical decision ma
 41. [Numeric Sentinel Detection — 3×IQR Fence + Absolute Count ≥5](#41-numeric-sentinel-detection--3iqr-fence--absolute-count-5)
 42. [Z-Score vs Min-Max Normalization — Selected by Outlier Presence](#42-z-score-vs-min-max-normalization--selected-by-outlier-presence)
 43. [Lean Baseline for LLM — Strip Default Fields Before Sending](#43-lean-baseline-for-llm--strip-default-fields-before-sending)
+61. [Split Rename — Separate LLM Call + Model Downgrade to llama-4-scout](#61-split-rename--separate-llm-call--model-downgrade-to-llama-4-scout)
+62. [LLM Rename Non-Determinism — Root Cause and Accepted Trade-Off](#62-llm-rename-non-determinism--root-cause-and-accepted-trade-off)
+63. [Prompt-Level Quality Gate for Rename — Tested, Rejected](#63-prompt-level-quality-gate-for-rename--tested-rejected)
 44. [Format Inconsistency Detection — Partial Castability, Not Regex Patterns](#44-format-inconsistency-detection--partial-castability-not-regex-patterns)
 45. [Type Cast Guard — Skip Unsafe Casts, Don't Silently Corrupt](#45-type-cast-guard--skip-unsafe-casts-dont-silently-corrupt)
 46. [Frontend Stack — React + Vite + TypeScript + Tailwind CSS v4](#46-frontend-stack--react--vite--typescript--tailwind-css-v4)
@@ -66,6 +69,15 @@ This document captures every significant architectural and technical decision ma
 58. [Download Button Placement — RunHeader, Not COMPLETED Card](#58-download-button-placement--runheader-not-completed-card)
 59. [AWAITING_REVIEW UI — Issues Bar, Rename Checkboxes, Expandable Column Rows](#59-awaiting_review-ui--issues-bar-rename-checkboxes-expandable-column-rows)
 60. [MinIO Object Lifecycle Policies — Raw and Curated Buckets](#60-minio-object-lifecycle-policies--raw-and-curated-buckets)
+61. [Split Rename — Separate LLM Call + Model Downgrade to llama-4-scout](#61-split-rename--separate-llm-call--model-downgrade-to-llama-4-scout)
+62. [LLM Rename Non-Determinism — Root Cause and Accepted Trade-Off](#62-llm-rename-non-determinism--root-cause-and-accepted-trade-off)
+63. [Prompt-Level Quality Gate for Rename — Tested, Rejected](#63-prompt-level-quality-gate-for-rename--tested-rejected)
+64. [_eda Field in Recommendations JSON — Display-Only Profile Snapshot](#64-_eda-field-in-recommendations-json--display-only-profile-snapshot)
+65. [EDA Dashboard in AWAITING_REVIEW Data Profile Tab](#65-eda-dashboard-in-awaiting_review-data-profile-tab)
+66. [AWAITING_REVIEW Tab Design — Recommendations | Data Profile | Data Preview](#66-awaiting_review-tab-design--recommendations--data-profile--data-preview)
+67. [COMPLETED State Tab Design — Mirrors AWAITING_REVIEW](#67-completed-state-tab-design--mirrors-awaiting_review)
+68. [DataPreviewTable — Bidirectional Scroll + Sticky Header](#68-datapreviewtable--bidirectional-scroll--sticky-header)
+69. [Drop-Impact Bitsets — Precomputed at Analysis Time](#69-drop-impact-bitsets--precomputed-at-analysis-time)
 
 ---
 
@@ -1432,6 +1444,47 @@ The raw output captures the LLM's actual response before fence stripping and JSO
 
 **Applied via `mc` CLI** (rules survive container restarts via the `minio-data` volume, but must be reapplied if the volume is wiped):
 
+---
+
+## 61. Split Rename — Separate LLM Call + Model Downgrade to llama-4-scout
+
+**Decision:** Column renaming was separated from the strategy enrichment call into a dedicated second LLM call. The model was simultaneously downgraded from `llama-3.3-70b-versatile` to `meta-llama/llama-4-scout-17b-16e-instruct`. The net result is two smaller, focused calls instead of one large combined call.
+
+**Context — the problem with the original single call:**
+
+The original `enrich_recommendations()` made a single LLM call responsible for two semantically distinct tasks: (1) deciding imputation strategy, type corrections, and transform hints per column, and (2) scanning every column name for abbreviations and suggesting renames. Combining these in one prompt caused two issues:
+
+- **Token exhaustion on large datasets.** The combined prompt for a dataset with 12 heavily-abbreviated columns (CRM: `cntct_id`, `acq_src`, `cmpny_nm`, `lead_scr`, `lst_cntct_dt`, …) caused the model to exhaust its output budget before completing all columns. The rename rule required the model to emit a `rename_to` entry for every column in a single JSON object, and the model would stop mid-output. This caused retry loops and inflated token costs (+100%+ on CRM in early runs).
+- **Duplicate-key bug.** The model would occasionally emit the same column twice in the JSON output — once for strategy changes and once for the rename — because it was resolving two different instructions simultaneously. `json.loads` silently drops duplicate keys (last value wins), so renames would overwrite strategy changes or vice versa with no error raised.
+
+**Options considered:**
+
+1. **Keep single call, increase output budget** — raises cost on every call regardless of dataset size; doesn't fix the duplicate-key bug; doesn't fix rename misses caused by strategy reasoning crowding out rename scanning.
+2. **Keep single call, stronger rename instruction** — tested extensively across 7 datasets; the model consistently deprioritised rename scanning when strategy decisions were complex. Adding more explicit rename rules increased hallucinations on ambiguous columns.
+3. **Split into two calls: strategy-only + rename-only** — each call has a single, clear responsibility. Validated across 7 datasets: A-only ≈ 0 (split approach never regresses on renames found by the combined call), B-only = 2–7 per dataset (split finds significantly more renames). Token overhead: +4–10% on small/medium datasets, −50% on large abbreviation-heavy datasets (CRM).
+
+**Why split calls work — task decomposition literature:**
+
+Decomposing complex LLM tasks into smaller specialised sub-calls is well-supported by recent research. Amazon Science (2024) demonstrates that "task decomposition using multiple, smaller, focused LLM calls can match or exceed the performance of a single large call while reducing cost." ADaPT (Allen AI, 2024, arXiv:2311.05657) shows success rate improvements of up to 33% by recursively decomposing tasks rather than solving them in one shot. The core mechanism: a model reasoning about imputation strategy is in a different "mode" than a model scanning for abbreviations — asking it to do both simultaneously means neither gets full attention.
+
+**Why the model downgrade is safe here:**
+
+The rename call is a deliberately simple, pattern-matching task: given a column name + 3 sample values, does the name contain an abbreviation that the values confirm? This does not require the 70B parameter model's reasoning depth. `llama-4-scout-17b` is a smaller, faster model that handles this classification task accurately. LLM cascading/routing research (arXiv:2410.10347, ICLR 2024) formalises this intuition: routing simpler queries to smaller models achieves comparable accuracy at roughly half the cost. Using the same smaller model for the strategy call as well maintains consistency and avoids managing multiple model versions.
+
+**Rename prompt design:**
+
+The rename call uses a dedicated `_RENAME_SYSTEM` prompt with two mandatory conditions before any rename is emitted: (1) the name must contain an abbreviation or be cryptic, AND (2) the sample values must confirm the implied meaning. This data-validated approach prevents the model from renaming based on name pattern alone — it must cross-check with actual values. Well-known domain acronyms (`sku`, `uuid`, `url`, `api`, `atm`, `pos`) are explicitly excluded.
+
+**Observed results (7 datasets, 3 independent runs):**
+
+| Metric | Result |
+|--------|--------|
+| A-only (renames split approach rejected) | 0–1 across all runs; the one rejection (`sku`) was correct |
+| B-only (renames single call missed) | 2–7 per dataset |
+| Token overhead vs single call | +4–10% on small/medium; −50% on large heavily-abbreviated datasets |
+
+**Trade-off acknowledged:** Two API calls per enrichment instead of one increases latency slightly (~0.3–0.8s for the rename call). Acceptable given the rename call is small and fast (llama-4-scout, 50–100 output tokens). The rename call is a soft-fail — any exception returns `{}` and the flow continues without renames rather than failing.
+
 ```bash
 docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
 docker exec minio mc ilm rule add --expiry-days 7  local/raw
@@ -1461,3 +1514,233 @@ docker exec minio mc ilm rule add --expiry-days 14 local/curated
 │ d6qb7t9roltdrbuu62a0 │ Enabled │ -      │ -    │             14 │ false               │
 └──────────────────────┴─────────┴────────┴──────┴────────────────┴─────────────────────┘
 ```
+
+
+## 62. LLM Rename Non-Determinism — Root Cause and Accepted Trade-Off
+
+**Context**
+
+Repeated profiling runs on the same dataset produced different numbers of `rename_to` suggestions — e.g. 8 renames on one run, 4 on the next, with identical input. All LLM calls already use `temperature=0`.
+
+**Root cause**
+
+Two hardware-level sources of non-determinism survive `temperature=0`:
+
+1. **Floating-point non-associativity on distributed hardware.** At `temperature=0` the model uses greedy decoding — it always picks the highest-probability next token. But on a multi-GPU or LPU cluster the order of floating-point additions varies between runs, producing rounding differences of ε. When two tokens have very similar log-probabilities, that ε can flip the argmax, sending the generation down a different path.
+
+2. **MoE expert-routing variance.** Llama 3.3 70B is a mixture-of-experts model. Concurrent requests compete for the same expert slots; the expert assigned to a given token can change between runs, shifting its hidden-state output slightly and cascading into different token choices downstream.
+
+**Investigation (log analysis)**
+
+Two runs of the opaque-fields dataset 2 minutes apart showed:
+- Run 1: `tokens_out=60`, 8 renames
+- Run 2: `tokens_out=30`, 4 renames — same prompt, same model, same `temperature=0`
+
+The explicit-null format test (`test_llm_rename_compare.py`) confirmed the 4 renames are the *correct conservative answer*: when forced to emit an explicit `null` for every column, the model chose null for the 4 ambiguous columns (start_date, end_date, score, rating), agreeing with the conservative run. The 8-rename run was the model being overconfident on genuinely ambiguous columns.
+
+**Options considered**
+
+| Option | Verdict |
+|--------|---------|
+| Fixed `seed` parameter | Groq supports it "best effort" but `seed` controls sampling randomness; at `temperature=0` there is no sampling, so seed cannot address floating-point or MoE variance |
+| Multi-seed majority vote | Correct in principle but 2–3× latency and cost for an advisory feature |
+| Explicit-null output format | Forces the model to process every column (no early-close); structurally more stable but doesn't change model uncertainty on ambiguous columns |
+
+**Decision**
+
+Accept the non-determinism as irreducible at the infrastructure level. The rename feature is explicitly advisory — the user reviews and approves all renames in the Recommendations editor before any transformation is applied. Inconsistency between runs is a UX inconvenience, not a correctness issue. The correct mitigation is the human review step, not prompt engineering.
+
+`temperature=0` remains set on all LLM calls. No `seed` is added. The explicit-null format is not adopted in production because it doesn't improve rename quality — it just makes the conservative outcome structurally guaranteed, which is already the safer default.
+
+---
+
+## 63. Prompt-Level Quality Gate for Rename — Tested, Rejected
+
+**Context**
+
+After documenting the non-determinism root cause in Decision #62, a prompt-level "quality gate" was tested as a potential mitigation. The gate is a self-verification checklist appended to the rename system prompt, instructing the model to validate its own output before producing it — a technique effective in other structured-output contexts (e.g. Mermaid diagram generation).
+
+**What was tested**
+
+`test_llm_rename_compare.py` ran two approaches on all 7 test datasets in a single session:
+
+- **B (current prod):** production rename prompt, sparse output format
+- **C (gate):** identical prompt + explicit `QUALITY GATE:` block with 7 verification rules (valid identifiers, abbreviation-only expansion, opaque columns must be omitted unless sample values are unambiguous, etc.)
+
+**Results across 7 datasets**
+
+| Dataset | B renames | C renames | Agree | Notes |
+|---------|-----------|-----------|-------|-------|
+| E-commerce Orders | 7 | 7 | 7 | identical |
+| Medical Lab | 7 | 6 | 6 | C dropped 1 (more conservative) |
+| Financial Transactions | 9 | 9 | 8 | 1 same col, different name |
+| IoT Sensors | 5 | 8 | 5 | C added 3 extra renames (more aggressive) |
+| Retail Catalog | 6 | 6 | 6 | identical |
+| CRM Contacts | 7 | 7 | 7 | identical |
+| Opaque Fields | 8 | 8 | 0 | all 8 columns renamed, completely different names |
+
+Token overhead: **+23–36%** on every dataset (longer system prompt).
+
+**Why the gate didn't help**
+
+The quality gate changes the prompt text, which changes the token distribution, which shifts MoE expert routing on the distributed inference cluster. The resulting output changes in an unpredictable *direction* — the gate made C more conservative on Medical Lab, more aggressive on IoT, and completely divergent on Opaque Fields (0/8 agreement with B in the same session, despite an earlier single-dataset run where both produced identical output).
+
+This confirms that the non-determinism is happening at the infrastructure level, not in the model's reasoning about the rename rules. Adding more rules to reason about doesn't constrain the output — it just reshapes the probability surface in a different way.
+
+**Decision**
+
+The prompt-level quality gate is not adopted. It costs +25–36% tokens with no reliable directional improvement and introduces a new source of inter-prompt variance (B vs C diverge more than two B runs would). The conclusion from Decision #62 stands: the human review step in the Recommendations editor is the correct and sufficient quality gate for rename suggestions.
+
+---
+
+## 64. _eda Field in Recommendations JSON — Display-Only Profile Snapshot
+
+**Decision:** A top-level `_eda` key is appended to the recommendations JSON in `build_recommendations()`. It contains a per-column profile snapshot used exclusively by the frontend EDA dashboard. It is never sent to the LLM and never read by `apply_recommendations()`.
+
+**Context:** The frontend Data Profile tab needs column-level statistics (stats, top_values, null_pct, etc.) to render charts and a missing heatmap. This data is already computed inside `profile_dataframe()` — the question was where to expose it.
+
+**Options considered:**
+
+| Option | Problem |
+|---|---|
+| New API endpoint `GET /api/runs/{run_id}/eda` | Extra round-trip; requires caching or recomputing from MinIO |
+| Store EDA data separately in the DB | Schema migration; another JSONB column |
+| Embed in `recommendations_generated` as `_eda` | Zero extra API calls; data is already present; underscore prefix signals "not user-editable" |
+
+**Why embed in recommendations:**
+The recommendations JSON is already loaded in full when the user reaches AWAITING_REVIEW. Embedding `_eda` there means the frontend has all display data it needs in a single payload. The `_lean_baseline()` function already excludes `_eda` (along with `_metadata`, `duplicates`, `outliers`) from the LLM context by construction — LLM only sees `"columns"`. `apply_recommendations()` reads only `columns`, `duplicates`, `outliers` — `_eda` is never touched.
+
+**Schema of `_eda`:**
+```json
+{
+  "_eda": {
+    "total_rows": 1200,
+    "total_columns": 14,
+    "duplicate_rows": 3,
+    "columns": {
+      "salary": {
+        "detected_type": "numeric",
+        "null_count": 42,
+        "null_pct": 3.5,
+        "stats": {"mean": 72000, "median": 68000, "std": 18000, "min": 22000, "max": 280000}
+      },
+      "department": {
+        "detected_type": "string",
+        "null_count": 0,
+        "null_pct": 0.0,
+        "unique_count": 5,
+        "cardinality_pct": 0.4,
+        "top_values": {"Engineering": 420, "Sales": 380, "HR": 210},
+        "pattern": null
+      }
+    }
+  }
+}
+```
+
+Numeric/date columns get `stats`. String/bool columns get `unique_count`, `cardinality_pct`, `top_values`, `pattern`. `histogram` is added when recharts histogram bins are pre-computed server-side (optional extension).
+
+---
+
+## 65. EDA Dashboard in AWAITING_REVIEW Data Profile Tab
+
+**Decision:** The Data Profile tab in AWAITING_REVIEW renders an `EDADashboard` component built from the `_eda` field in `recommendations_generated`. All computation is client-side. No additional API calls are made at render time.
+
+**Context:** The supervisor requested visual charts for the thesis demo. The goal was to make data quality issues immediately visible — before the user starts editing recommendations — so they understand *what* they're dealing with before reviewing 30+ column rows.
+
+**Components:**
+
+| Component | Source data | What it shows |
+|---|---|---|
+| Summary pills | `_eda.total_rows`, `total_columns`, `duplicate_rows`, `dqScores.overall` | 4 high-level stats in a row |
+| `DQRadarChart` | `dqScores` (4 dimensions) | Radar polygon on 4 axes: Completeness, Uniqueness, Validity, Consistency |
+| `MissingHeatmap` | `_eda.columns[*].null_pct` | Colour-coded tiles per column sorted by missing % (green → yellow → amber → red) |
+| `HistogramGrid` | `_eda.columns[*].stats` (numeric/date) | Distribution bar charts per numeric column |
+| `BoxPlotGroup` | `_eda.columns` + `recommendations.outliers` | Tukey box plots for columns with detected outliers; IQR bounds from `outliers` section |
+| `CategoricalBars` | `_eda.columns[*].top_values` (string/bool, cardinality < 10%) | Horizontal frequency bars for low-cardinality categorical columns |
+
+**Why no charting library dependency for most components:**
+`MissingHeatmap` and `CategoricalBars` are pure CSS (flexbox, percentage widths). `HistogramGrid` and `BoxPlotGroup` are pure SVG — no Recharts needed. Only `DQRadarChart` uses Recharts (`RadarChart` component) because a radar polygon on n axes is significantly easier to implement correctly with a library. Keeping library use minimal reduces bundle size and avoids version conflicts.
+
+**Data Profile tab fallback:** If `_eda` is not present (e.g. older run before the field existed) or `dqBefore` is null, a "Profile data not available — re-upload the file" message is shown. This handles backward compatibility with pre-existing runs gracefully.
+
+**EDA scope:** The EDA dashboard covers the **raw uploaded data** before any transformation. It is intentionally excluded from the COMPLETED state — showing the original distribution charts after cleaning would be misleading (the data is different now). The COMPLETED Data Profile tab shows only before/after DQ scores and issue counts.
+
+---
+
+## 66. AWAITING_REVIEW Tab Design — Recommendations | Data Profile | Data Preview
+
+**Decision:** AWAITING_REVIEW uses a three-tab layout controlled by `activeTab` state. The default tab is Recommendations. Switching tabs does not reload data — all three tabs' data is available from the initial page load.
+
+**Context:** Previously, AWAITING_REVIEW showed the recommendations editor as a full-page view with no way to see the raw data profile or preview the file without leaving the page. Users had to hold the DQ score in their head while editing.
+
+**Tabs:**
+
+| Tab | Content | Data source |
+|---|---|---|
+| Recommendations | `RecommendationsEditor` — full column table, duplicates section, outliers section; SubmitBar anchored below | `recommendations_generated` |
+| Data Profile | `EDADashboard` — radar chart, heatmap, histograms, box plots, categorical bars | `recommendations_generated._eda` + `dq_scores_before` |
+| Data Preview | `DataPreviewTable` — raw uploaded file rows | `getRunPreview(runId)` called on mount |
+
+**Why default to Recommendations:** The primary action on this page is reviewing and editing recommendations. Showing the editor first keeps the user on the task. Data Profile and Data Preview are reference views — users switch to them when they need context.
+
+**SubmitBar placement:** The submit button is anchored below the main content area (outside the tab switcher), rendered only when `activeTab === "recommendations"`. It disappears on profile/preview tabs — you cannot accidentally submit while looking at charts.
+
+---
+
+## 67. COMPLETED State Tab Design — Mirrors AWAITING_REVIEW
+
+**Decision:** The COMPLETED state was refactored from three stacked sections (Statistics card + RecsViewer + Cleaned Data preview) into a three-tab layout matching the AWAITING_REVIEW tab design. A separate `completedTab` state drives the COMPLETED tabs independently of `activeTab` (AWAITING_REVIEW).
+
+**Context:** The original COMPLETED layout stacked all content vertically — users had to scroll past the before/after score comparison to reach the recommendations viewer, and then scroll further to reach the cleaned data table. On datasets with many recommendations, the page became unwieldy.
+
+**Tabs:**
+
+| Tab | Content |
+|---|---|
+| Recommendations | `RecsViewer` with Generated / Applied / Diff sub-tabs |
+| Data Profile | `ScoreComparison` + `IssuesGrid` (before/after DQ scores and per-issue-type counts) |
+| Data Preview | `DataPreviewTable` with cleaned file rows (`cleanedPreview`) |
+
+**Why no EDA in COMPLETED Data Profile:** The `_eda` field captures the raw uploaded data before transformation. Showing raw distribution charts after cleaning would show the *old* data, which is misleading. The COMPLETED profile tab intentionally contains only the before/after quality metrics — these are meaningful post-transform because they compare the original DQ state to the cleaned result.
+
+**"Upload new file" button placement:** The button is rendered outside and below the tab content, always visible regardless of which tab is active. It is a primary navigation action (exit the current run), not a tab-specific action.
+
+**Two independent tab states:** `activeTab` controls AWAITING_REVIEW, `completedTab` controls COMPLETED. They are separate `useState` calls because a run transitions through states — if a user refreshes on a COMPLETED run, `completedTab` starts at `"recommendations"` independently of where `activeTab` was last set.
+
+---
+
+## 68. DataPreviewTable — Bidirectional Scroll + Sticky Header
+
+**Decision:** The `DataPreviewTable` component uses `overflow-auto max-h-[60vh]` on the scroll container and `min-w-full` on the `<table>` element. The `<thead>` is `sticky top-0 z-10` to remain visible during vertical scroll.
+
+**Context:** Wide datasets (many columns) required horizontal scrolling — the table was clipping at the container boundary. Tall datasets (many rows) required vertical scrolling — the table was growing the page height without a cap, making the rest of the layout inaccessible.
+
+**Why `min-w-full` instead of `w-full`:** `w-full` constrains the table to the container width, preventing horizontal scroll. `min-w-full` means "at least as wide as the container, but grow further if columns require it" — when the table is wider than the container, `overflow-auto` kicks in and shows a horizontal scrollbar.
+
+**Why `max-h-[60vh]` (viewport-relative):** A fixed pixel value (e.g. `max-h-[480px]`) gives a different number of visible rows on a 27-inch 1440p display vs a 14-inch 1080p laptop. 60% of viewport height is consistent across screen sizes — it consistently shows approximately 12–18 rows depending on font rendering without occupying more than half the visible screen.
+
+**Sticky header:** Without `sticky top-0`, scrolling down past the first screen of rows would hide the column names. The background colour (`bg-white dark:bg-zinc-900`) is explicitly set on `<thead>` to prevent the table body rows from showing through the sticky header during scroll.
+
+**Applies to both preview contexts:** `DataPreviewTable` is a shared component used in both AWAITING_REVIEW (raw data preview) and COMPLETED (cleaned data preview) — the scrolling behaviour applies consistently to both.
+
+---
+
+## 69. Drop-Impact Bitsets — Precomputed at Analysis Time
+
+**Decision:** `build_dropmasks()` in `dq_logic.py` computes a per-operation bitset at DQ analysis time. The `upload_dropmasks` Prefect task stores the bitsets as a JSON blob in MinIO at `{file_id}/dropmasks_{run_id}.json`. A backend endpoint reads the bitsets and evaluates the user's current strategy selection to return exact row counts.
+
+**Context:** The AWAITING_REVIEW UI needed to show users how many rows would actually be dropped before they approved recommendations. Per-column `null_count` values give upper bounds but not the correct total — when multiple columns use `drop_row`, rows null in multiple columns are only dropped once (set union, not sum). This is the FC1 item from todo.md.
+
+**What a bitset encodes:** For each destructive operation (null strategy `drop_row` per column, outlier `remove` per column, deduplication), a boolean array of length `n_rows` is created where `True` = this row would be affected by this operation. The array is packed to `np.packbits` and base64-encoded for JSON storage. Restoring is `np.unpackbits(bytes, count=n_rows)`.
+
+**Endpoint evaluation:** The API endpoint for drop-impact receives the current strategy selections from the frontend. It loads the bitsets, builds a combined mask via bitwise OR over all active `drop_row` / `remove` operations, then adds deduplication rows if `duplicates.strategy == "drop"`. `popcount(combined_mask)` gives the exact number of rows that would be removed.
+
+**Why precompute, not load CSV on demand:**
+- Loading a 200MB CSV on every slider change would take seconds
+- The bitsets for a 1M-row, 10-column dataset are ~1.25MB — fast to load and evaluate in memory
+- Bitsets are computed once per run, during the DQ flow that already has the DataFrame in memory
+
+**Non-critical soft fail:** If `build_dropmasks` or `upload_dropmasks` fails for any reason (the operation is not in the critical path of the DQ flow), the run still completes normally. The frontend `getDropImpact` call catches errors silently — the impact summary is informational and the AWAITING_REVIEW page is fully usable without it.
+
+**Frontend integration:** `RecommendationsEditor` calls `getDropImpact` with a 300ms debounce whenever the recommendations state changes. The response (`DropImpactResponse`) includes exact row counts for null drops, outlier removes, and deduplication. This fulfils the FC1 requirement from `docs/todo.md` without the simulate-endpoint round-trip approach.

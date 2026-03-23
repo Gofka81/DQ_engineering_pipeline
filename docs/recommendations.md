@@ -10,7 +10,9 @@ The pipeline is structured around the six practitioner dimensions of data qualit
 
 > **Note on ISO 8000:** ISO 8000 governs data quality for supply-chain master data (GDSN product records, asset registers). It is not applicable to general-purpose CSV profiling. The earlier citation of "ISO 8000 alignment" in this project's documentation was inaccurate and has been corrected.
 
-> **Scope disclaimer:** This pipeline adopts practitioner interpretations of DAMA DMBOK dimensions. It is not ISO-certified and does not implement full standard compliance. Every threshold (50% null, IQR 1.5×, cardinality 10%, 80% MAR correlation) is a configurable heuristic, not a statistically universal rule. Rules labelled "deterministic" are reproducible code rules; rules labelled "heuristic" are calibrated defaults that may not generalise to all domains.
+> **Scope disclaimer:** This pipeline adopts practitioner interpretations of DAMA DMBOK dimensions. It is not ISO-certified and does not implement full standard compliance. Every threshold (50% null, IQR 1.5×, cardinality 10%, α=0.05 MAR significance) is a configurable heuristic, not a statistically universal rule. Rules labelled "deterministic" are reproducible code rules; rules labelled "heuristic" are calibrated defaults that may not generalise to all domains.
+
+> **Note on DQ score weights (35/25/25/15):** Neither DAMA DMBOK nor ISO/IEC 25012 specifies numeric weights between dimensions. The weights (Completeness 35%, Uniqueness 25%, Validity 25%, Consistency 15%) are project-specific heuristics reflecting the relative practical impact of each dimension on downstream data usability. They should be disclosed as such in any thesis discussion.
 
 Each dimension maps to one or more recommendation types. The "Implementation scope" column is an honest statement of what the pipeline currently checks.
 
@@ -34,10 +36,16 @@ Missing data is classified by its mechanism before a strategy is chosen. The mec
 | Mechanism | What it means | How we detect it | Correct treatment |
 |---|---|---|---|
 | **MCAR** — Missing Completely At Random | Nulls have no pattern. The scale ran out of batteries. | Little's test / no correlation found | Safe to impute |
-| **MAR** — Missing At Random | Nulls correlate with an *observed* column. ATM rows → no merchant name. | Statistical correlation check (see below) | `leave_null` — imputing destroys the signal |
+| **MAR** — Missing At Random | Nulls correlate with an *observed* column. ATM rows → no merchant name. | Statistical correlation check (see below) | `leave_null` *(conservative default — see note below)* |
 | **MNAR** — Missing Not At Random | Nulls correlate with an *unobserved* value. High earners skip salary field. | Cannot detect from data alone — needs domain reasoning | `leave_null` — inferred by LLM from column name + context |
 
-**MAR detection (code):** For each nullable column, the pipeline checks whether its null rows cluster on a specific value in another column (≥80% of nulls appear when column B = value V, and V is not the majority value of B overall). If detected, `leave_null` is applied directly in the baseline — this is a statistical fact, not an LLM decision.
+**MAR detection (code):** For each nullable column with ≥5 nulls, a binary `is_missing` indicator is correlated against every other column using a statistical significance test (α = 0.05):
+- **Numeric columns** — point-biserial correlation (`scipy.stats.pointbiserialr`): tests whether the mean of the other column differs significantly between rows where this column is missing vs. present.
+- **Categorical columns** — chi-square test of independence (`scipy.stats.chi2_contingency`): tests whether the distribution of the other column's values differs between missing and non-missing rows.
+
+If p < 0.05 for any pairing, the column is flagged as MAR and `leave_null` is applied directly in the baseline — this is a statistical result, not an LLM decision.
+
+> **Note on MAR treatment:** The academically standard treatment for MAR data is **multiple imputation (MI)** — van Buuren (2018) "Flexible Imputation of Missing Data" is built entirely around MI for MAR. This pipeline uses `leave_null` as a conservative, safe default: it preserves the structural signal in the data without fabricating values. MI would be statistically valid but is out of scope for this prototype (requires iterative model fitting per column). This is a known simplification and should be disclosed in any thesis discussion.
 
 **MNAR detection (LLM):** When a column is >50% null and its name suggests a sparse-by-design attribute (`adv_evt_dt`, `resolved_at`, `conv_dt`, `incident_dt`), the LLM overrides `drop_column` to `leave_null` using semantic reasoning about the column's domain role.
 
@@ -47,7 +55,7 @@ When multiple rules could apply to a column, this is the explicit priority order
 
 | Priority | Rule | Owner | Can be overridden by |
 |---|---|---|---|
-| 1 | MAR detection — `_detect_mar_columns()` (scipy point-biserial + chi-square, α=0.05) → `leave_null` | Code | User only |
+| 1 | MAR detection — `_detect_mar_columns()` (point-biserial for numeric, chi-square for categorical, α=0.05, min 5 nulls) → `leave_null` | Code | User only |
 | 2 | ≥50% null → `drop_column` | Code | LLM (MNAR only — event/optional columns), User |
 | 3 | Type-based rules (ID/pattern → `drop_row`, numeric → `median`, etc.) | Code | LLM, User |
 | 4 | LLM semantic override (MNAR `leave_null`, `rename_to`) | LLM | User |
@@ -82,8 +90,8 @@ The `drop_column` rule (≥50%) is checked first and overrides type-based rules.
 
 | Strategy | Auto-recommended | Effect |
 |---|---|---|
-| `median` | Yes — symmetric numeric | Fill nulls with column median |
-| `mean` | Yes — skewed numeric | Fill nulls with column mean |
+| `median` | Yes — skewed numeric (outliers present or |mean−median|/std > 0.15) | Fill nulls with column median |
+| `mean` | Yes — symmetric numeric (no outliers, mean ≈ median) | Fill nulls with column mean |
 | `mode` | Yes — bool, low-cardinality string | Fill nulls with the most frequent value |
 | `fill` | User / LLM only | Fill nulls with a literal value (e.g. `0`, `"unknown"`) |
 | `drop_row` | Yes — ID, pattern, date, high-cardinality string | Drop the row where this column is null or invalid |
@@ -113,11 +121,11 @@ The profiler detects both string and numeric sentinel patterns and stores them i
 ### Recommendation
 
 When `sentinel_count > 0`, the recommendation:
-1. Stores the detected sentinel values in `columns[col].sentinel_values` (list of values)
-2. Adds a `warning` string describing the sentinel pattern and count
-3. **Automatically replaces sentinel values with NaN** in step 0 of `apply_recommendations()` — sentinels in numeric columns are replaced before any fill strategy is applied, so the fill is applied to real nulls only
+1. Adds a `warning` string describing the sentinel pattern and count
+2. For **numeric columns only**: stores detected values in `columns[col].sentinel_values` (e.g. `[-999.0]`) and **automatically replaces them with NaN** in step 0 of `apply_recommendations()` before any fill strategy runs
+3. For **string columns**: `sentinel_values` is `null` — the count and warning are present but replacement is not yet implemented (tracked as todo 4.9)
 
-The replacement at apply time means a `missing_values` fill strategy is automatically generated for any column that has sentinels but no real nulls — the fill will handle the NaN created by the sentinel replacement.
+For numeric sentinel columns, a `missing_values` fill strategy is automatically generated to handle the NaN created by the sentinel replacement.
 
 ---
 
@@ -138,7 +146,7 @@ For every column: infer the correct type from the actual values and recommend a 
 
 **Type cast guard:** Before applying any `int` or `float` cast, `_would_cast_safely()` simulates the cast and checks how many non-null values would become `NaN` (via `errors="coerce"`). If >5% of non-null values would be lost, the cast is **skipped** and a warning is logged. This prevents a column like `["50000", "60000", "N/A"]` where `"N/A"` is 33% of values from silently losing a third of its data. The column stays as `object` dtype — it needs a custom transform to normalise the format first.
 
-**Format inconsistency detection** (separate from sentinels): A string column that partially casts to numeric — `castable_count ≥ 5` non-null values convert successfully AND `castable_pct < 80%` — is flagged as having mixed formats. This generates a `warning` in `columns[col].warnings` and surfaces the issue as `format_inconsistency: true` in the profiler output. The column is a candidate for a custom transform (section 9). The cast guard then prevents the cast from proceeding.
+**Format inconsistency detection** (separate from sentinels): A string column that partially casts to numeric — `castable_count ≥ 5` non-null values convert successfully AND `castable_pct < 80%` — is flagged as having mixed formats. This generates a `warning` in `columns[col].warnings` and surfaces the issue as `format_inconsistency: true` in the profiler output. The column is a candidate for a custom transform (section 8). The cast guard then prevents the cast from proceeding.
 
 ---
 
@@ -196,7 +204,9 @@ Records representing the same entity but with slight variation ("John Doe" vs "J
 
 ---
 
-## 6. Usability — Normalization / Standardisation
+## 6. Data Preparation — Normalization / Standardisation
+
+> **Note:** Normalization is not one of the six DAMA DMBOK data quality dimensions. It is a data preparation step included in this pipeline because it is a common prerequisite for downstream ML and analytics tasks, and is typically expected as part of a data cleaning workflow.
 
 Normalisation scales numeric column values so they are comparable across different ranges. It is relevant beyond machine learning:
 
@@ -240,7 +250,55 @@ Rename suggestions are **user-facing proposals**, not enforced. The user reviews
 
 ---
 
-## 8. LLM Enrichment — Scope and Boundary
+## 8. Custom Transforms — Two-LLM Pipeline
+
+When a column has a per-cell value-level issue that cannot be fixed by type cast alone (e.g. `"46%"`, `"$1,200"`, mixed date formats), a two-step LLM pipeline generates and executes a validated pandas transform.
+
+### Step 1 — LLM 1 sets `transform_hint` (column enrichment)
+
+During DQ analysis, LLM 1 (`enrich_recommendations()`) reviews column profiles and sample rows. For any **string-type column** with a visible per-cell formatting issue, it sets `transform_hint` to a short imperative action sentence:
+
+```
+"strip '%' suffix and divide by 100"
+"strip leading '$' and commas then convert to float"
+```
+
+`transform_hint` is visible to the user in the recommendations JSON and can be edited or cleared before submission.
+
+### Step 2 — LLM 2 generates `transform_code`
+
+After enrichment, `generate_transform_code()` is called for every column that has a `transform_hint` but no `transform_code`. LLM 2 converts the hint to a pandas expression:
+
+```python
+"df['margin_pct'].str.rstrip('%').astype(float) / 100"
+```
+
+**Three validation layers (per column):**
+1. **Syntax** — `compile()` catches malformed code
+2. **AST safety** — whitelist of allowed operations (`str.strip`, `str.replace`, `astype`, `pd.to_numeric`, etc.); blocks `eval`, `exec`, `import`, dunder access
+3. **Execution test** — run on first 200 rows; verifies result is a Series of the same length and new null rate ≤ 5%
+
+Up to 3 retry attempts per column. If all fail, the column is skipped (`transform_code` stays null) and a warning is logged — the run does not fail.
+
+### Step 0b — execution in `apply_recommendations()`
+
+`transform_code` is executed **before** any type cast (step 0b, after sentinel replacement in step 0):
+
+```
+Step 0:   replace sentinel values → NaN
+Step 0b:  execute transform_code (sandboxed eval, rollback on >5% new nulls or exception)
+Step 1:   type cast (now safe — format already normalised)
+```
+
+Rollback: the original column is saved before execution. If the transform raises an exception or introduces >5% new nulls, the original is restored and a warning is logged.
+
+### User-added hints in transform flow
+
+Users can add or edit `transform_hint` in the AWAITING_REVIEW UI for any column. When the user submits, `generate_missing_transform_codes()` runs LLM 2 in the transform flow for any column that has a hint but no generated code — ensuring manually-added hints are always executed.
+
+---
+
+## 9. LLM Enrichment — Scope and Boundary
 
 After the code generates the baseline recommendations, an LLM (Groq — llama-3.3-70b-versatile) reviews column profiles and sample rows to improve them.
 
@@ -365,7 +423,9 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
       "normalize":       false,
       "warnings":        ["'mixed_amount' has mixed value formats — 35.0% of values are not numeric-castable (e.g. '$1,200', 'N/A', 'TBD'). Type cast would corrupt data; a custom transform is needed to normalize format first."],
       "note":            null,
-      "sentinel_values": null
+      "sentinel_values": null,
+      "transform_hint":  "strip leading '$' and commas then convert to float",
+      "transform_code":  "df['mixed_amount'].str.replace('[$,]', '', regex=True).pipe(pd.to_numeric, errors='coerce')"
     },
     "adv_evt_dt": {
       "type":            "date",
@@ -437,8 +497,10 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
 | `normalize` | `"min_max"` (no outliers), `"z_score"` (outliers present), or `false` (no scaling needed) | Code |
 | `warnings` | List of human-readable impact messages (drop_row, drop_column, sentinel, format inconsistency) | Code |
 | `note` | One-sentence explanation of reasoning for the recommendation | LLM / user |
-| `sentinel_values` | List of detected sentinel values (e.g. `[-999.0]`), or `null` if none | Code |
-| `rename_to` | LLM-suggested clearer column name (Python identifier), or `null` | LLM / user |
+| `sentinel_values` | List of detected **numeric** sentinel values (e.g. `[-999.0]`), or `null`; string sentinels add to `warnings` only | Code |
+| `rename_to` | LLM-suggested clearer column name (valid Python identifier), or `null` | LLM / user |
+| `transform_hint` | Imperative action sentence describing a per-cell value transform (e.g. `"strip '%' suffix and divide by 100"`); string columns only; `null` if not applicable | LLM / user |
+| `transform_code` | Validated pandas expression generated from `transform_hint`; `null` until LLM 2 generates it; executed in step 0b of `apply_recommendations()` before any type cast | LLM (generated) |
 
 **`missing_values.strategy` options**
 
@@ -457,7 +519,7 @@ If `LLM_API_KEY` is not set, the `groq` package is not installed, or all 3 retry
 | Field | Values |
 |---|---|
 | `count` | Number of outliers detected |
-| `method` | `iqr` (default) or `zscore` |
+| `method` | `iqr` (only implemented method; schema enforces `Literal["iqr"]`) |
 | `lower` | Lower IQR bound (Q1 − 1.5×IQR) — used by `winsorise` and `remove` |
 | `upper` | Upper IQR bound (Q3 + 1.5×IQR) — used by `winsorise` and `remove` |
 | `strategy` | `keep` `winsorise` `remove` `cap` |

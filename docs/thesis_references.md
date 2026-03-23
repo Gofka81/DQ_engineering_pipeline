@@ -8,9 +8,11 @@ Organised by topic. Each entry includes: source, URL, and the decision it suppor
 
 ## 1. Data Quality Standards and Frameworks
 
-### ISO 8000 / ISO IEC 25012 — Data Quality Dimensions
+### DAMA DMBOK / ISO/IEC 25012 — Data Quality Dimensions
 
-**Source:** ISO 8000-8 and ISO/IEC 25012 — six quality dimensions: completeness, validity, uniqueness, consistency, accuracy, timeliness.
+**Source:** DAMA DMBOK (Data Management Body of Knowledge) — six practitioner DQ dimensions: completeness, validity, uniqueness, consistency, accuracy, timeliness. ISO/IEC 25012 defines 15 data quality characteristics; this project implements four of them (completeness, uniqueness, validity, consistency).
+
+> **Note on ISO 8000:** ISO 8000 governs data quality for supply-chain master data (GDSN product records, asset registers) and is not applicable to general-purpose CSV profiling. An earlier version of this project incorrectly cited ISO 8000 alignment — that has been corrected.
 
 - [ISO 8000-1:2022 Overview](https://www.iso.org/obp/ui/#iso:std:iso:8000:-1:ed-1:v1:en)
 - [ISO 8000 Wikipedia summary](https://en.wikipedia.org/wiki/ISO_8000)
@@ -18,7 +20,7 @@ Organised by topic. Each entry includes: source, URL, and the decision it suppor
 - [Comparison of DQ Frameworks — MDPI 2025](https://www.mdpi.com/2504-2289/9/4/93)
 - [EWSolutions — Complete 2025 DQ Guide](https://www.ewsolutions.com/data-quality-quide/)
 
-**Supports:** Engineering Decision #37 — structuring the recommendation framework around ISO 8000 dimensions rather than an ad-hoc taxonomy.
+**Supports:** Engineering Decision #37 — structuring the recommendation framework around DAMA DMBOK / ISO/IEC 25012 dimensions rather than an ad-hoc taxonomy.
 
 ---
 
@@ -213,3 +215,25 @@ Organised by topic. Each entry includes: source, URL, and the decision it suppor
 - The partial diff format (LLM returns only changes) — Engineering Decision #33
 - Post-processing guards as a reliability layer over probabilistic LLM output — Engineering Decision #34
 - The narrowed LLM scope: semantic decisions only, not statistical computations — Engineering Decision #38
+
+---
+
+## 10. LLM Task Decomposition and Model Cascading
+
+**Source:** Research on splitting complex LLM tasks into smaller specialised sub-calls, and on routing simpler queries to smaller models.
+
+- [How Task Decomposition and Smaller LLMs Can Make AI More Affordable — Amazon Science (2024)](https://www.amazon.science/blog/how-task-decomposition-and-smaller-llms-can-make-ai-more-affordable)
+- [An Approach for Systematic Decomposition of Complex LLM Tasks — arXiv:2510.07772 (2025)](https://arxiv.org/html/2510.07772v1)
+- [A Unified Approach to Routing and Cascading for LLMs — arXiv:2410.10347 (ICLR 2025)](https://arxiv.org/abs/2410.10347)
+- [Dynamic Model Routing and Cascading for Efficient LLM Inference: A Survey — arXiv:2603.04445 (2026)](https://arxiv.org/html/2603.04445)
+- [ADaPT: As-Needed Decomposition and Planning with Language Models — Allen AI (2024)](https://allenai.github.io/adaptllm/)
+
+**Key findings:**
+- Amazon Science (2024): "task decomposition using multiple smaller focused LLM calls can match or exceed the performance of a single large call while reducing cost."
+- ADaPT (Allen AI): recursive task decomposition improves success rates by up to 33% over single-call approaches across three benchmarks.
+- arXiv:2410.10347: routing simpler queries to smaller models achieves comparable accuracy at roughly half the inference cost; cascade routing outperforms both routing-only and cascading-only strategies.
+
+**Supports:** Engineering Decision #61 — splitting the LLM enrichment call into a strategy-only call and a separate rename-only call, with simultaneous model downgrade from `llama-3.3-70b-versatile` (70B) to `llama-4-scout-17b-16e-instruct` (17B). The rename task is a pattern-matching classification that does not require the reasoning depth of the 70B model; keeping a single model for both calls maintains consistency while the task decomposition recovers quality lost when both concerns competed in one prompt.
+
+## 11. LLM Non-Determinism
+https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/

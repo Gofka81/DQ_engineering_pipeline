@@ -1,5 +1,20 @@
 import { useRef, useState } from "react"
-import type { ColumnConfig } from "../../types"
+import type { ColumnConfig, MissingValuesFill } from "../../types"
+
+function fillImpactLabel(mv: MissingValuesFill): string | null {
+  const n = mv.null_count
+  if (!n || n === 0) return null
+  switch (mv.strategy) {
+    case "drop_row":    return `${n} nulls → drop row`
+    case "drop_column": return `→ column removed`
+    case "fill":        return `${n} nulls → fill with ${mv.value ?? "?"}`
+    case "mean":        return `${n} nulls → fill with mean`
+    case "median":      return `${n} nulls → fill with median`
+    case "mode":        return `${n} nulls → fill with mode`
+    case "leave_null":  return `${n} nulls kept`
+    default:            return null
+  }
+}
 
 interface Props {
   name: string
@@ -41,6 +56,7 @@ export function ColumnRow({ name, config, onChange }: Props) {
   const hasWarnings = config.warnings.length > 0
   const hasNote = !!config.note
   const hasHint = config.transform_hint != null && config.transform_hint !== ""
+  const hasSentinels = !!(config.sentinel_values?.length)
   const hasContent = true // always expandable — transform hint can be added to any column
 
   function handleRenameBlur(v: string) {
@@ -87,8 +103,9 @@ export function ColumnRow({ name, config, onChange }: Props) {
           <select
             value={config.missing_values?.strategy ?? ""}
             onChange={(e) => {
-              const s = e.target.value as ColumnConfig["missing_values"] extends { strategy: infer S } ? S : never
-              onChange({ missing_values: s ? { strategy: s, value: null } : null })
+              const s = e.target.value as (typeof FILL_STRATEGIES)[number]
+              const nullCount = config.missing_values?.null_count
+              onChange({ missing_values: s ? { strategy: s, value: null, null_count: nullCount } : null })
             }}
             className={selectCls}
           >
@@ -100,10 +117,16 @@ export function ColumnRow({ name, config, onChange }: Props) {
               type="text"
               placeholder="value"
               defaultValue={config.missing_values.value ?? ""}
-              onBlur={(e) => onChange({ missing_values: { strategy: "fill", value: e.target.value } })}
+              onBlur={(e) => onChange({ missing_values: { strategy: "fill", value: e.target.value, null_count: config.missing_values?.null_count } })}
               className={`ml-1 w-20 ${inputCls}`}
             />
           )}
+          {config.missing_values && (() => {
+            const label = fillImpactLabel(config.missing_values!)
+            return label ? (
+              <span className="ml-1.5 text-xs text-zinc-400 dark:text-zinc-500">{label}</span>
+            ) : null
+          })()}
         </td>
 
         {/* Normalize */}
@@ -203,6 +226,27 @@ export function ColumnRow({ name, config, onChange }: Props) {
                 <div>
                   <p className="font-semibold text-gray-500 dark:text-zinc-400 mb-1">Note</p>
                   <p className="text-gray-500 dark:text-zinc-400 italic">{config.note}</p>
+                </div>
+              )}
+              {hasSentinels && (
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="font-semibold text-red-500">Sentinel values</p>
+                    <label className="flex items-center gap-1 text-gray-500 dark:text-zinc-400 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={config.replace_sentinels !== false}
+                        onChange={(e) => onChange({ replace_sentinels: e.target.checked })}
+                        className="accent-red-500 cursor-pointer"
+                      />
+                      replace with null
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {config.sentinel_values!.map((v, i) => (
+                      <span key={i} className="px-2 py-0.5 bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 rounded font-mono">{String(v)}</span>
+                    ))}
+                  </div>
                 </div>
               )}
               <div>

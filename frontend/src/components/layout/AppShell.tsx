@@ -65,7 +65,7 @@ export function AppShell({ sidebar, children }: Props) {
         </div>
       </div>
       {/* Main */}
-      <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-zinc-950">
+      <div className="flex-1 flex flex-col overflow-hidden h-full bg-gray-50 dark:bg-zinc-950">
         {children}
       </div>
     </div>

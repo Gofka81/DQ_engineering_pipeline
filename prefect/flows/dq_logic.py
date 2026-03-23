@@ -9,18 +9,20 @@ All functions here are plain Python and can be tested without a Prefect context:
 Architecture
 ------------
 Code  → scrapes objective facts  (metadata / column_profiles)
-LLM   → interprets those facts   (fill strategy, explanations)   [Phase 3]
+LLM   → interprets those facts   (fill strategy, explanations)
 Human → approves the result      (via PUT /recommendations)
 
 Everything in this file is deterministic and LLM-free.
 """
 import ast
+import base64
 import io
 import logging
 import re
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -58,8 +60,7 @@ def parse_csv(stream) -> tuple[pd.DataFrame, int]:
         malformed_rows += 1
 
     # Buffer into BytesIO — raw urllib3 responses (MinIO) are not reliably
-    # iterable by the Python CSV engine. BytesIO is seekable and works with
-    # both engines. The DataFrame must be in memory anyway, so no memory cost.
+    # iterable by the Python CSV engine. BytesIO is seekable and works with both engines.
     buf = io.BytesIO(stream.read())
     df = pd.read_csv(buf, on_bad_lines=_on_bad_line, engine="python")
     return df, malformed_rows
@@ -117,6 +118,13 @@ def profile_dataframe(df: pd.DataFrame, malformed_rows: int = 0) -> dict[str, An
                         invalid_count = int(coerced.isna().sum())
                     except Exception:
                         pass
+                elif detected_type == "string":
+                    pattern_name = col_profile.get("pattern")
+                    if pattern_name and pattern_name in _PATTERNS:
+                        pat = _PATTERNS[pattern_name]
+                        invalid_count = int(
+                            non_null.astype(str).apply(lambda x: not bool(pat.fullmatch(x))).sum()
+                        )
         col_profile["invalid_count"] = invalid_count
         col_profile["detected_type"] = detected_type
         col_profile["pandas_dtype"] = str(df[col].dtype)
@@ -268,7 +276,7 @@ def apply_recommendations(df: pd.DataFrame, recommendations: dict[str, Any]) -> 
     # to real missing values.
     for col, col_def in columns.items():
         sentinels = col_def.get("sentinel_values")
-        if sentinels and col in df.columns:
+        if sentinels and col_def.get("replace_sentinels", True) and col in df.columns:
             df[col] = df[col].replace(sentinels, float("nan"))
 
     # ------------------------------------------------------------------
@@ -507,7 +515,8 @@ def build_recommendations(df: pd.DataFrame, profile: dict[str, Any], dq_score: f
                 strategy = "leave_null"
             else:
                 strategy = _fill_strategy(detected_type, cp)
-            missing_values_def = {"strategy": strategy, "value": None}
+            affected_count = int(cp.get("null_count", 0)) + int(cp.get("invalid_count", 0)) + int(cp.get("sentinel_count", 0))
+            missing_values_def = {"strategy": strategy, "value": None, "null_count": affected_count}
         else:
             strategy = None
             missing_values_def = None
@@ -553,7 +562,7 @@ def build_recommendations(df: pd.DataFrame, profile: dict[str, Any], dq_score: f
                 + ". Type cast would corrupt data; a custom transform is needed to normalize format first."
             )
 
-        recommendations["columns"][col] = {
+        col_rec = {
             "type": _schema_type(detected_type, cp),
             "nullable": needs_fill,
             "missing_values": missing_values_def,
@@ -562,6 +571,9 @@ def build_recommendations(df: pd.DataFrame, profile: dict[str, Any], dq_score: f
             "note": None,
             "sentinel_values": sentinel_vals or None,
         }
+        if sentinel_vals:
+            col_rec["replace_sentinels"] = True
+        recommendations["columns"][col] = col_rec
 
     # --- Outliers ---
     # Only numeric columns with detected outliers get an entry.
@@ -592,7 +604,88 @@ def build_recommendations(df: pd.DataFrame, profile: dict[str, Any], dq_score: f
         v["count"] for v in recommendations["outliers"].values()
     )
 
+    # EDA section — display-only data for the frontend dashboard.
+    # Never sent to the LLM (_lean_baseline returns only "columns").
+    # Not processed by apply_recommendations (only reads columns/duplicates/outliers).
+    eda_cols = {}
+    for col, cp in column_profiles.items():
+        dtype = cp.get("detected_type", "string")
+        entry: dict[str, Any] = {
+            "detected_type": dtype,
+            "null_count": cp.get("null_count", 0),
+            "null_pct": cp.get("null_pct", 0.0),
+        }
+        if dtype in ("numeric", "date"):
+            entry["stats"] = cp.get("stats", {})
+        if dtype in ("string", "bool"):
+            entry["unique_count"] = cp.get("unique_count", 0)
+            entry["cardinality_pct"] = cp.get("cardinality_pct", 0.0)
+            entry["top_values"] = cp.get("top_values", {})
+            entry["pattern"] = cp.get("pattern")
+        eda_cols[col] = entry
+
+    recommendations["_eda"] = {
+        "total_rows": profile["total_rows"],
+        "total_columns": profile["total_columns"],
+        "duplicate_rows": profile["duplicate_rows"],
+        "columns": eda_cols,
+    }
+
     return recommendations
+
+
+def build_dropmasks(df: pd.DataFrame, profile: dict, recs: dict) -> dict:
+    """
+    Build bitset-based drop masks for each destructive operation in the recommendations.
+
+    Returns {
+        "n_rows": int,
+        "ops":     { op_name: base64_packed_bitset, ... },
+        "op_meta": { op_name: {"type": "null"|"outlier"|"duplicate", "col": str|None} }
+    }
+    Each bitset is np.packbits of a bool array of length n_rows, base64-encoded.
+    Restore with np.unpackbits(raw_bytes, count=n_rows).
+    """
+    n_rows = len(df)
+    ops: dict[str, str] = {}
+    op_meta: dict[str, dict] = {}
+
+    # Null masks — one per column that has a missing_values strategy
+    for col, col_def in recs.get("columns", {}).items():
+        if col not in df.columns:
+            continue
+        if col_def.get("missing_values") is None:
+            continue
+        cp = profile["column_profiles"].get(col, {})
+        null_mask = df[col].isna()
+        # Include string sentinel values — they become NaN before drop_row executes
+        sentinels = cp.get("sentinel_values") or []
+        if sentinels:
+            null_mask = null_mask | df[col].isin(sentinels)
+        if null_mask.any():
+            ops[f"null_{col}"] = base64.b64encode(np.packbits(null_mask.values)).decode()
+            op_meta[f"null_{col}"] = {"type": "null", "col": col}
+
+    # Outlier masks
+    for col, out_def in recs.get("outliers", {}).items():
+        if col not in df.columns:
+            continue
+        lower, upper = out_def.get("lower"), out_def.get("upper")
+        if lower is None or upper is None:
+            continue
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        outlier_mask = (numeric < lower) | (numeric > upper)
+        if outlier_mask.any():
+            ops[f"outlier_{col}"] = base64.b64encode(np.packbits(outlier_mask.values)).decode()
+            op_meta[f"outlier_{col}"] = {"type": "outlier", "col": col}
+
+    # Duplicate mask
+    dup_mask = df.duplicated(keep="first")
+    if dup_mask.any():
+        ops["duplicate"] = base64.b64encode(np.packbits(dup_mask.values)).decode()
+        op_meta["duplicate"] = {"type": "duplicate", "col": None}
+
+    return {"n_rows": n_rows, "ops": ops, "op_meta": op_meta}
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +792,16 @@ def _profile_numeric_column(series: pd.Series) -> dict[str, Any]:
         outlier_lower = round(float(q1 - 1.5 * iqr), 4)
         outlier_upper = round(float(q3 + 1.5 * iqr), 4)
         outlier_count = int(((numeric_vals < outlier_lower) | (numeric_vals > outlier_upper)).sum())
+        stats["q1"] = round(float(q1), 4)
+        stats["q3"] = round(float(q3), 4)
+
+    # 10-bin histogram for EDA display (skipped for date columns where numeric_vals is empty)
+    if len(numeric_vals) >= 10:
+        counts, edges = np.histogram(numeric_vals, bins=10)
+        stats["histogram"] = {
+            "counts": counts.tolist(),
+            "edges": [round(float(e), 4) for e in edges],
+        }
 
     sentinel_count, sentinel_values = _detect_numeric_sentinels(series)
 
@@ -751,7 +854,7 @@ def _profile_string_column(series: pd.Series) -> dict[str, Any]:
                 detected_pattern = pattern_name
                 break
 
-    sentinel_count = _count_sentinels(series)
+    sentinel_count, sentinel_values = _count_sentinels(series)
 
     # Partial castability — detect mixed-format columns.
     # Uses the same pd.to_numeric the apply step would use: ground truth, no regex.
@@ -778,6 +881,7 @@ def _profile_string_column(series: pd.Series) -> dict[str, Any]:
         "top_values": top_values,
         "pattern": detected_pattern,
         "sentinel_count": sentinel_count,
+        "sentinel_values": sentinel_values,
         "format_inconsistency": format_inconsistency,
         "castable_pct": castable_pct,
         "non_castable_sample": non_castable_sample,
@@ -795,21 +899,27 @@ _SENTINEL_STRINGS: frozenset = frozenset({
 })
 
 
-def _count_sentinels(series: pd.Series) -> int:
+def _count_sentinels(series: pd.Series) -> tuple[int, list[str]]:
     """
-    Count non-null string values that look like placeholder sentinels.
+    Count and collect non-null string values that look like placeholder sentinels.
 
     Sentinel strings are human-typed substitutes for null (e.g. "N/A",
     "unknown", "-", "?"). They are not NaN so pandas counts them as valid
     values, but they should be treated as missing before imputation.
 
-    Returns 0 for an empty or all-null series.
+    Returns original-casing values so df.replace() can hit the actual stored value.
+    No frequency threshold — every match in the curated frozenset is a sentinel.
+
+    Returns (count, [unique_sentinel_values]) or (0, []) for empty/all-null series.
     """
     non_null = series.dropna()
     if len(non_null) == 0:
-        return 0
-    normalised = non_null.astype(str).str.strip().str.lower()
-    return int(normalised.isin(_SENTINEL_STRINGS).sum())
+        return 0, []
+    as_str = non_null.astype(str).str.strip()
+    normalised = as_str.str.lower()
+    mask = normalised.isin(_SENTINEL_STRINGS)
+    found = sorted(as_str[mask].unique().tolist())
+    return int(mask.sum()), found
 
 
 def _detect_numeric_sentinels(series: pd.Series) -> tuple[int, list[float]]:

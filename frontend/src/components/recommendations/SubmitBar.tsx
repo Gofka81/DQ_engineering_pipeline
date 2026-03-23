@@ -11,7 +11,7 @@ export function SubmitBar({ onSubmit, disabled, loading }: Props) {
 
   if (confirming) {
     return (
-      <div className="sticky bottom-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 px-4 py-3 flex items-center justify-end gap-3">
+      <div className="flex-shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 px-4 py-3.5 flex items-center justify-end gap-3">
         <span className="text-sm text-gray-600 dark:text-zinc-300">Apply these transformations?</span>
         <button
           onClick={() => setConfirming(false)}
@@ -31,7 +31,7 @@ export function SubmitBar({ onSubmit, disabled, loading }: Props) {
   }
 
   return (
-    <div className="sticky bottom-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 px-4 py-3 flex justify-end">
+    <div className="flex-shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 px-4 py-3.5 flex justify-end">
       <button
         onClick={() => setConfirming(true)}
         disabled={disabled || loading}
