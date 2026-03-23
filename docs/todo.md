@@ -1279,11 +1279,11 @@ export interface RunOut {
 | F1 | Confidence level per recommendation | future | Future consideration | — |
 | F2 | Numeric LLM confidence score | future | Future consideration | — |
 | F3 | Log LLM overrides of deterministic baseline | `llm_enrichment.py` | Future (cheap) | **Done** |
-| F4 | LLM reasoning for outlier strategy selection | `llm_enrichment.py`, `file.py` | Future enhancement | — |
+| F4 | LLM reasoning for outlier strategy selection | `llm_enrichment.py`, `file.py` | Future enhancement | **Done** |
 | F5 | rename_to v2 — opaque column names | `llm_enrichment.py` | Future enhancement | **Done** |
 | UI1 | Data preview of applied recommendations (curated CSV first 50 rows) | `backend/app/api/runs.py`, `frontend/src/components/run/` | New feature | **Done** |
 | UI2 | Dark / light mode toggle | `frontend/src/` | Enhancement | **Done** |
 | UI3 | Issues detected grid in COMPLETED score card | `frontend/src/components/run/RunDetailView.tsx` | Enhancement | **Done** |
 | UI4 | Score delta grey when 0 change | `frontend/src/components/scores/DQScoreBar.tsx` | Polish | **Done** |
 | UI5 | Recommendation diff viewer (Generated / Applied / Diff tabs) | `frontend/src/components/run/RecsViewer.tsx` | New feature | **Done** |
-| UI6 | "Continue processing" from COMPLETED run — create new run using curated CSV as input, goes to AWAITING_REVIEW so user can add more transforms without re-uploading | `backend/app/api/files.py`, `backend/app/schemas/file.py`, `frontend/src/api/runs.ts`, `frontend/src/components/run/RunDetailView.tsx` | New feature | — |
+

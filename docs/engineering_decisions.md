@@ -1770,7 +1770,11 @@ Numeric/date columns get `stats`. String/bool columns get `unique_count`, `cardi
 
 **Column warning added for non-"keep" strategies:** When `strategy != "keep"`, a warning is appended to the column's `warnings` list so the user sees the impact in the Recommendations editor before approving.
 
-**Schema change:** `outliers[col]` gains `"note": null` (LLM-populated) and the static `"strategy"` is now heuristic-selected instead of always `"keep"`. The `OutliersConfig` TypeScript interface gains `note?: string | null`. The frontend `OutliersSection` renders a message-bubble icon with a `title` tooltip when note is non-null.
+**Schema change:** `outliers[col]` gains `"note": null` (LLM-populated) and the static `"strategy"` is now heuristic-selected instead of always `"keep"`. The `OutliersConfig` TypeScript interface gains `note?: string | null`. The frontend `OutliersSection` renders the note as visible italic text in a sub-row spanning all columns — chosen over a hover tooltip because notes require no interaction to read.
+
+**LLM note prompt requirements (refined after first evaluation):** Initial outputs were generic ("likely measurement errors, not legitimate extremes" repeated verbatim across all columns). The prompt was tightened to require reasoning on three specific axes: (1) physical/domain plausibility of the IQR bounds themselves, (2) whether the outlier count and prevalence pattern suggests systematic noise, heavy-tailed distribution, or entry errors, (3) whether the heuristic strategy is justified — and if already optimal, to say why rather than reflexively suggesting a change. Generic default phrases are explicitly banned in the prompt.
+
+**Self-referential note guard:** A post-processing step strips the "consider 'X' instead of 'X'" suffix when the heuristic strategy already matches what the LLM would have suggested. This occurs when the heuristic independently selects the same strategy the LLM would recommend, causing the LLM's templated phrasing to compare a strategy to itself. If stripping leaves an empty string, the note is discarded rather than stored.
 
 ---
 

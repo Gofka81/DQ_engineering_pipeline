@@ -54,7 +54,7 @@ From `docs/todo.md` — confirmed as future scope, not in-progress.
 | ID | Feature | Current state | Notes |
 |----|---------|--------------|-------|
 | F4 | LLM reasoning for outlier strategy selection | Default strategy is `keep`; user must manually change to winsorise/remove/cap | LLM could recommend a strategy with domain rationale; requires a targeted prompt and a new `strategy_note` field in the outlier section |
-| UI6 | "Continue processing" from a COMPLETED run | User must re-upload the original file; no way to use the curated CSV as input for a new run | Requires a new API endpoint to clone a curated file into the upload flow; no frontend changes needed beyond a button |
+
 
 ---
 

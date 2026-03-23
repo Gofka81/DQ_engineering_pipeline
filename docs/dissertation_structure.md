@@ -169,7 +169,8 @@
 - Drop-impact bitsets: `build_dropmasks()` precomputes a bit array per column marking which rows would be dropped under each strategy; stored in MinIO at analysis time; `/api/runs/{run_id}/drop-impact` endpoint takes current recommendation state and returns exact row counts in sub-millisecond time; `RecommendationsEditor` polls with 300ms debounce on recommendation edits
 
 ### 4.3 LLM Enrichment Pipeline (3p)
-- LLM 1 — `enrich_recommendations()`: constructs lean baseline (default fields stripped + outlier section with strategy/count/bounds included), sends to Groq + Llama 3.3 70B with system prompt enforcing format rules; validates returned JSON against schema; post-processing guards: MAR `leave_null` cannot be overridden, `rename_to` must be valid Python identifier, `transform_hint` must be non-empty string if present, outlier `strategy`/`count`/`lower`/`upper` are read-only (guard strips them if hallucinated); deep-merges partial diff onto baseline including outlier notes
+- LLM 1 — `enrich_recommendations()`: constructs lean baseline (default fields stripped + outlier section with strategy/count/bounds included), sends to Groq + Llama 3.3 70B with system prompt enforcing format rules; validates returned JSON against schema; post-processing guards: MAR `leave_null` cannot be overridden, `rename_to` must be valid Python identifier, `transform_hint` must be non-empty string if present, outlier `strategy`/`count`/`lower`/`upper` are read-only (guard strips them if hallucinated), self-referential outlier notes ("consider X instead of X") are stripped; deep-merges partial diff onto baseline including outlier notes
+- Outlier note prompt quality: generic default phrasings are explicitly banned in the system prompt; the LLM is required to reason on three axes — IQR bound plausibility, prevalence pattern interpretation, and strategy justification; this was a necessary refinement after initial evaluation showed template-like notes repeated across all columns
 - Explicit LLM 1 rule (Phase 2.6): if a column has a `format_inconsistency` warning, LLM MUST add `transform_hint`; enforced in `_RUNNER_SYSTEM` prompt rules
 - LLM 2 — `generate_transform_code()`: takes `transform_hint` → constructs prompt requesting a pandas lambda expression → AST-validates the returned expression (whitelist: safe builtins, pandas string methods, arithmetic; blocks `eval`/`exec`/`import`/`__`); execution-tested on 200 sample rows; up to 3 retries with error feedback; accepted code stored in `transform_code`
 - `generate_missing_transform_codes()` in transform flow: runs LLM 2 for any column with a `transform_hint` but no `transform_code`; handles user-added hints that were not present at analysis time
@@ -250,7 +251,7 @@
 ### 6.3 Future Work (1p)
 - ML model on (generated, approved) diff pairs: train on the delta between auto-generated and user-approved recommendations to predict better defaults over time; per-user preference learning
 - Fuzzy deduplication: blocking + similarity threshold for approximate duplicate detection; required for real-world entity data (name variants, address formats)
-- "Continue processing" from COMPLETED run (UI6): new run using curated CSV as input without requiring re-upload; enables iterative cleaning workflows
+
 - Per-user preference learning from recommendation edit history: train on (generated, approved) diff pairs to predict better defaults over time (F4 LLM outlier reasoning is now implemented — see §4.2 and §4.3)
 - Cross-column consistency dimension: detect constraint violations between columns; would require schema-aware rules or LLM-driven constraint inference
 
