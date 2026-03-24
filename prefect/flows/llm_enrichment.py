@@ -1018,6 +1018,8 @@ def generate_transform_code(
 
         sample = df[col].dropna().head(10).tolist()
         target_type = col_def.get("type", "string")
+        null_pct = df[col].isna().mean() * 100
+        nullable_line = f"yes ({null_pct:.1f}% null — NaN cells arrive as float in .apply(); guard with: <expr> if pd.notna(x) else x)" if null_pct > 0 else "no"
         previous_code = ""
         previous_error = ""
 
@@ -1026,6 +1028,7 @@ def generate_transform_code(
                 user_content = (
                     f"Column: {col}\n"
                     f"Target type: {target_type}\n"
+                    f"Nullable: {nullable_line}\n"
                     f"Sample values: {sample}\n"
                     f"Transform: {transform_hint}"
                 )
@@ -1033,6 +1036,7 @@ def generate_transform_code(
                 user_content = (
                     f"Column: {col}\n"
                     f"Target type: {target_type}\n"
+                    f"Nullable: {nullable_line}\n"
                     f"Sample values: {sample}\n"
                     f"Transform: {transform_hint}\n\n"
                     f"Your previous attempt:\n{previous_code}\n\n"
@@ -1103,7 +1107,8 @@ def generate_transform_code(
                     col, attempt + 1, err,
                 )
                 previous_code = code
-                previous_error = f"Execution test failed: {err}"
+                null_hint = f" (column is {null_pct:.1f}% null — check the Nullable line above and add a null guard)" if null_pct > 0 else ""
+                previous_error = f"Execution test failed: {err}{null_hint}"
                 continue
 
             col_def["transform_code"] = code
