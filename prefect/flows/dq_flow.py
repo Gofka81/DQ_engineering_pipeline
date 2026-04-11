@@ -281,10 +281,10 @@ async def dq_analysis_flow(run_id: str, file_id: str, minio_path: str, has_heade
         await update_run_status(run_id, "ANALYZING")
         _publish_status(run_id, {"status": "ANALYZING"})
 
-        df, malformed_rows       = load_dataframe_from_minio(minio_path, run_id, has_header=has_header)
-        profile                  = profile_data(df, run_id, malformed_rows)
-        dq_score                 = calculate_dq_score(profile, run_id)
-        recommendations          = generate_recommendations(df, profile, dq_score, run_id)
+        df, malformed_rows = load_dataframe_from_minio(minio_path, run_id, has_header=has_header)
+        profile = profile_data(df, run_id, malformed_rows)
+        dq_score = calculate_dq_score(profile, run_id)
+        recommendations = generate_recommendations(df, profile, dq_score, run_id)
         enriched_recommendations = enrich_with_llm(profile, recommendations, df, run_id)
         upload_dropmasks(df, profile, enriched_recommendations, file_id, run_id)
 
