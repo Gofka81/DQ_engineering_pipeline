@@ -32,9 +32,15 @@ services:
         condition: service_healthy
     environment:
       PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres-prefect:5432/prefect
-      PREFECT_UI_API_URL: http://127.0.0.1:4200/api
+      PREFECT_UI_API_URL: ${PREFECT_UI_API_URL:-http://localhost:4200/api}
       PREFECT_API_URL: http://prefect-server:4200/api   # internal
     command: prefect server start --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   prefect-worker:
     build:
@@ -43,10 +49,14 @@ services:
     container_name: prefect-worker
     restart: unless-stopped
     depends_on:
-      - prefect-server
-      - redis
-      - postgres-prefect
-      - minio
+      prefect-server:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      postgres-prefect:
+        condition: service_healthy
+      minio:
+        condition: service_started
     volumes:
       - ./prefect:/prefect
       - ./logs:/logs
@@ -128,7 +138,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: http://localhost:8000
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     ports:
       - "3000:80"
     depends_on:
