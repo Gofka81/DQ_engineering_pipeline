@@ -60,8 +60,6 @@ services:
     volumes:
       - ./prefect:/prefect
       - ./logs:/logs
-    env_file:
-      - .env
     environment:
       # Prefect settings
       PREFECT_API_URL: http://prefect-server:4200/api
@@ -72,6 +70,15 @@ services:
       POSTGRES_HOST: postgres
       MINIO_ENDPOINT: minio:9000
       REDIS_HOST: redis
+      # Injected from Portainer UI / .env
+      POSTGRES_USER: ${POSTGRES_USER:-prefect}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefect}
+      BACKEND_DB: ${BACKEND_DB:-backend}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_JOBS_QUEUE: ${REDIS_JOBS_QUEUE:-jobs}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      LLM_API_KEY: ${LLM_API_KEY:-}
     command: >
       bash -c "
       prefect deploy --all &&
@@ -126,12 +133,23 @@ services:
         condition: service_started
       minio:
         condition: service_started
-    env_file:
-      - .env
     environment:
       POSTGRES_HOST: postgres
       MINIO_ENDPOINT: minio:9000
       REDIS_HOST: redis
+      # Injected from Portainer UI / .env
+      POSTGRES_USER: ${POSTGRES_USER:-prefect}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefect}
+      BACKEND_DB: ${BACKEND_DB:-backend}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_JOBS_QUEUE: ${REDIS_JOBS_QUEUE:-jobs}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      SECRET_KEY: ${SECRET_KEY:-change-this-secret}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-200}
+      LLM_API_KEY: ${LLM_API_KEY:-}
 
   frontend:
     container_name: frontend
