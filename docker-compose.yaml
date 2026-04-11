@@ -125,7 +125,7 @@ services:
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8020:8000"
     depends_on:
       postgres-prefect:
         condition: service_healthy
