@@ -44,6 +44,5 @@ dask-worker-space/
 /CLAUDE.md
 
 # Logs
-logs
 *.log
 /frontend/node_modules/
