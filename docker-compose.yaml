@@ -58,8 +58,7 @@ services:
       minio:
         condition: service_started
     volumes:
-      - ./prefect:/prefect
-      - ./logs:/logs
+      - logs:/logs
     environment:
       # Prefect settings
       PREFECT_API_URL: http://prefect-server:4200/api
@@ -87,7 +86,7 @@ services:
       trap 'kill -TERM $$REDIS_PID $$PREFECT_PID 2>/dev/null' TERM INT &&
       prefect worker start --pool default-agent-pool &
       PREFECT_PID=$$! &&
-      wait -n &&
+      wait -n $$REDIS_PID $$PREFECT_PID &&
       kill -TERM $$REDIS_PID $$PREFECT_PID 2>/dev/null
       "
 
@@ -166,3 +165,4 @@ volumes:
   postgres-data:
   redis-data:
   minio-data:
+  logs:
