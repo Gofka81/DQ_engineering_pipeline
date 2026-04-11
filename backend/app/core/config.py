@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     # MinIO
     MINIO_ENDPOINT: str = Field(default="localhost:9000")
+    MINIO_PUBLIC_ENDPOINT: Optional[str] = Field(default=None)
     MINIO_ROOT_USER: str = Field(default="minioadmin")
     MINIO_ROOT_PASSWORD: SecretStr = Field(default="minioadmin")
     MINIO_RAW_BUCKET: str = Field(default="raw")
