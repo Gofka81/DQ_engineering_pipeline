@@ -120,16 +120,20 @@ class RunOut(BaseModel):
     created_at: datetime
     completed_at: datetime | None = None
     error_message: str | None = None
-    storage_expired: bool = False
+    source_expired: bool = False
+    result_expired: bool = False
 
     model_config = {"from_attributes": True}
 
     @model_validator(mode="after")
-    def compute_storage_expired(self) -> "RunOut":
-        if self.status == RunStatus.COMPLETED and self.created_at:
-            # asyncpg returns TIMESTAMPTZ as tz-aware datetime; make now() match
-            now = datetime.now(self.created_at.tzinfo or timezone.utc)
-            self.storage_expired = now > self.created_at + timedelta(days=14)
+    def compute_storage_flags(self) -> "RunOut":
+        if not self.created_at:
+            return self
+        now = datetime.now(self.created_at.tzinfo or timezone.utc)
+        age = now - self.created_at
+        self.source_expired = age > timedelta(days=7)
+        if self.status == RunStatus.COMPLETED:
+            self.result_expired = age > timedelta(days=14)
         return self
 
 

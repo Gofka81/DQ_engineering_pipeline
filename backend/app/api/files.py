@@ -553,6 +553,83 @@ async def get_run(
     return run
 
 
+@runs_router.post("/{run_id}/restart", response_model=RunStatusResponse)
+async def restart_run(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    minio: MinioService = Depends(get_minio_service),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """
+    Clone a COMPLETED or FAILED run into a new AWAITING_REVIEW run.
+    The new run inherits the file, DQ scores before, and recommendations so the
+    user can adjust settings and re-apply the transform without re-uploading.
+    For FAILED runs, only allowed when recommendations_generated exists
+    (i.e. analysis completed before the failure).
+    """
+    result = await db.execute(
+        select(Run)
+        .join(FileModel)
+        .where(Run.id == run_id, FileModel.user_id == current_user.id)
+    )
+    source = result.scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    if source.status not in (RunStatus.COMPLETED, RunStatus.FAILED):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Can only restart a COMPLETED or FAILED run. Current status: {source.status}",
+        )
+
+    if not source.recommendations_generated:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot restart: analysis did not complete — no recommendations to copy",
+        )
+
+    # Start from what the user previously approved so they don't redo all edits.
+    # Fall back to auto-generated if the run never reached the transform step.
+    if source.recommendations_approved:
+        new_recs = dict(source.recommendations_approved)
+        # Restore _eda from generated — required for the EDA dashboard tab
+        generated = dict(source.recommendations_generated)
+        if "_eda" not in new_recs and "_eda" in generated:
+            new_recs["_eda"] = generated["_eda"]
+    else:
+        new_recs = dict(source.recommendations_generated)
+
+    new_run = Run(
+        file_id=source.file_id,
+        status=RunStatus.AWAITING_REVIEW,
+        recommendations_generated=new_recs,
+        dq_scores_before=source.dq_scores_before,
+    )
+    db.add(new_run)
+    await db.commit()
+    await db.refresh(new_run)
+
+    # Copy drop masks to the new run path — best-effort, 404 is handled gracefully
+    try:
+        from minio.commonconfig import CopySource
+        minio.client.copy_object(
+            minio.raw_bucket,
+            f"{source.file_id}/dropmasks_{new_run.id}.json",
+            CopySource(minio.raw_bucket, f"{source.file_id}/dropmasks_{run_id}.json"),
+        )
+    except Exception:
+        pass
+
+    return RunStatusResponse(
+        run_id=new_run.id,
+        file_id=new_run.file_id,
+        status=new_run.status,
+        dq_scores_before=new_run.dq_scores_before,
+        dq_scores_after=None,
+        error_message=None,
+    )
+
+
 @runs_router.get("/{run_id}/download", response_model=DownloadResponse)
 async def download_run_result(
     run_id: UUID,

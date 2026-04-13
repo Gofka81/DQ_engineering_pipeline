@@ -155,7 +155,8 @@ export interface RunOut {
   created_at: string
   completed_at: string | null
   error_message: string | null
-  storage_expired: boolean
+  source_expired: boolean
+  result_expired: boolean
 }
 
 export interface RunStatusResponse {

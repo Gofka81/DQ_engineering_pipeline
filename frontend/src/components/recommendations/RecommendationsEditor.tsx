@@ -10,9 +10,10 @@ interface Props {
   initialRecs: Recommendations
   dqScoresBefore: DQScores | null
   onRecsChange: (recs: Recommendations) => void
+  sourceExpired?: boolean
 }
 
-export function RecommendationsEditor({ runId, initialRecs, dqScoresBefore, onRecsChange }: Props) {
+export function RecommendationsEditor({ runId, initialRecs, dqScoresBefore, onRecsChange, sourceExpired }: Props) {
   const [recs, setRecs] = useState<Recommendations>(() => structuredClone(initialRecs))
   const [impact, setImpact] = useState<DropImpactResponse | null>(null)
   const onRecsChangeRef = useRef(onRecsChange)
@@ -56,6 +57,7 @@ export function RecommendationsEditor({ runId, initialRecs, dqScoresBefore, onRe
   }, [])
 
   useEffect(() => {
+    if (sourceExpired) return
     const timer = setTimeout(async () => {
       try {
         const result = await getDropImpact(runId, {

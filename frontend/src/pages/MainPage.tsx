@@ -132,6 +132,13 @@ export function MainPage() {
     handleNewAnalysis()
   }
 
+  function handleRestarted(newRunId: string, fileId: string) {
+    setSelectedRunId(newRunId)
+    setSelectedFileId(fileId)
+    queryClient.invalidateQueries({ queryKey: ["runs", fileId] })
+    queryClient.invalidateQueries({ queryKey: ["files-with-latest-run"] })
+  }
+
   // Determine what to show in main
   const isActiveRun = selectedRunId === liveRun?.runId
 
@@ -171,6 +178,7 @@ export function MainPage() {
           liveErrorMessage={isActiveRun ? liveRun?.errorMessage : undefined}
           onRecommendationsSubmitted={isActiveRun ? handleRecommendationsSubmitted : undefined}
           onUploadNew={isActiveRun ? handleUploadNew : undefined}
+          onRestarted={handleRestarted}
         />
       )}
 

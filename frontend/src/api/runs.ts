@@ -1,5 +1,5 @@
 import client from "./client"
-import type { DataPreview, DownloadResponse, DropImpactRequest, DropImpactResponse } from "../types"
+import type { DataPreview, DownloadResponse, DropImpactRequest, DropImpactResponse, RunStatusResponse } from "../types"
 
 export async function getDownloadUrl(runId: string): Promise<DownloadResponse> {
   const res = await client.get<DownloadResponse>(`/runs/${runId}/download`)
@@ -13,5 +13,10 @@ export async function getDropImpact(runId: string, body: DropImpactRequest): Pro
 
 export async function getRunPreview(runId: string, stage: "raw" | "cleaned" = "raw"): Promise<DataPreview> {
   const res = await client.get<DataPreview>(`/runs/${runId}/preview`, { params: { stage } })
+  return res.data
+}
+
+export async function restartRun(runId: string): Promise<RunStatusResponse> {
+  const res = await client.post<RunStatusResponse>(`/runs/${runId}/restart`)
   return res.data
 }

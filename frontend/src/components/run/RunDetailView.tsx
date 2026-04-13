@@ -109,7 +109,7 @@ import { ScoreComparison } from "../scores/ScoreComparison"
 import { RecommendationsEditor } from "../recommendations/RecommendationsEditor"
 import { SubmitBar } from "../recommendations/SubmitBar"
 import { EDADashboard } from "../eda/EDADashboard"
-import { getDownloadUrl, getRunPreview } from "../../api/runs"
+import { getDownloadUrl, getRunPreview, restartRun } from "../../api/runs"
 
 interface Props {
   runData: RunOut
@@ -121,6 +121,7 @@ interface Props {
   liveErrorMessage?: string | null
   onRecommendationsSubmitted?: () => void
   onUploadNew?: () => void
+  onRestarted?: (newRunId: string, fileId: string) => void
 }
 
 export function RunDetailView({
@@ -132,6 +133,7 @@ export function RunDetailView({
   liveErrorMessage,
   onRecommendationsSubmitted,
   onUploadNew,
+  onRestarted,
 }: Props) {
   const status = liveStatus ?? runData.status
   const dqBefore = liveDqScoresBefore !== undefined ? liveDqScoresBefore : runData.dq_scores_before
@@ -144,12 +146,13 @@ export function RunDetailView({
   const [previewLoading, setPreviewLoading] = useState(false)
 
   useEffect(() => {
+    if (runData.source_expired) return
     setPreviewLoading(true)
     getRunPreview(runData.id)
       .then(setPreviewData)
       .catch(() => {})
       .finally(() => setPreviewLoading(false))
-  }, [runData.id])
+  }, [runData.id, runData.source_expired])
 
   const [cleanedPreview, setCleanedPreview] = useState<DataPreview | null>(null)
 
@@ -189,6 +192,25 @@ export function RunDetailView({
     window.open(res.download_url, "_blank")
   }
 
+  const [restartLoading, setRestartLoading] = useState(false)
+  const [restartError, setRestartError] = useState<string | null>(null)
+
+  async function handleRestart() {
+    setRestartLoading(true)
+    setRestartError(null)
+    try {
+      const res = await restartRun(runData.id)
+      onRestarted?.(res.run_id, res.file_id)
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Restart failed"
+      setRestartError(msg)
+    } finally {
+      setRestartLoading(false)
+    }
+  }
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <RunHeader
@@ -196,8 +218,11 @@ export function RunDetailView({
         filename={filename}
         status={status}
         createdAt={runData.created_at}
-        storageExpired={runData.storage_expired}
+        resultExpired={runData.result_expired}
+        sourceExpired={runData.source_expired}
         onDownload={status === "COMPLETED" ? handleDownload : undefined}
+        onRestart={handleRestart}
+        restartLoading={restartLoading}
       />
 
       <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-6">
@@ -217,6 +242,15 @@ export function RunDetailView({
               </p>
               <p className="text-gray-400 dark:text-zinc-500 text-sm mt-1">Updates arrive in real time</p>
             </div>
+          </div>
+        )}
+
+        {/* PENDING + source expired — job will never be picked up */}
+        {status === "PENDING" && runData.source_expired && (
+          <div className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-xl p-6">
+            <p className="text-sm text-amber-700 dark:text-amber-400">
+              Source file expired — this job was queued but the file was deleted before analysis ran. Upload the file again.
+            </p>
           </div>
         )}
 
@@ -259,14 +293,21 @@ export function RunDetailView({
                     initialRecs={runData.recommendations_generated}
                     dqScoresBefore={dqBefore}
                     onRecsChange={handleRecsChange}
+                    sourceExpired={runData.source_expired}
                   />
                 )}
                 {activeTab === "preview" && (
-                  <DataPreviewTable
-                    data={previewData}
-                    loading={previewLoading}
-                    totalRows={dqBefore?.total_rows ?? undefined}
-                  />
+                  runData.source_expired ? (
+                    <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-700 p-8 text-center text-sm text-gray-400 dark:text-zinc-500">
+                      Source file expired — preview unavailable after 7 days.
+                    </div>
+                  ) : (
+                    <DataPreviewTable
+                      data={previewData}
+                      loading={previewLoading}
+                      totalRows={dqBefore?.total_rows ?? undefined}
+                    />
+                  )
                 )}
               </>
             ) : (
@@ -347,14 +388,17 @@ export function RunDetailView({
               />
             )}
 
-            {onUploadNew && (
-              <div className="flex gap-3">
-                <button
-                  onClick={onUploadNew}
-                  className="px-4 py-2 text-sm border border-gray-300 dark:border-zinc-600 rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800 dark:text-zinc-300 transition-colors"
-                >
-                  Upload new file
-                </button>
+            {(onUploadNew || restartError) && (
+              <div className="flex flex-wrap gap-3 items-center">
+                {onUploadNew && (
+                  <button
+                    onClick={onUploadNew}
+                    className="px-4 py-2 text-sm border border-gray-300 dark:border-zinc-600 rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800 dark:text-zinc-300 transition-colors"
+                  >
+                    Upload new file
+                  </button>
+                )}
+                {restartError && <p className="text-red-500 text-sm">{restartError}</p>}
               </div>
             )}
           </>
@@ -365,14 +409,35 @@ export function RunDetailView({
           <div className="bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-xl p-6">
             <p className="font-medium text-red-700 dark:text-red-400 mb-1">Analysis failed</p>
             {errorMessage && <p className="text-sm text-red-500 dark:text-red-400">{errorMessage}</p>}
-            {onUploadNew && (
-              <button
-                onClick={onUploadNew}
-                className="mt-3 px-4 py-2 text-sm border border-red-300 dark:border-red-700 text-red-700 dark:text-red-400 rounded-lg hover:bg-red-100 dark:hover:bg-red-900"
-              >
-                Upload new file
-              </button>
-            )}
+            <div className="flex flex-wrap gap-3 items-center mt-3">
+              {runData.recommendations_generated && (
+                runData.source_expired ? (
+                  <span
+                    title="Source file expired — re-run is unavailable after 7 days"
+                    className="px-4 py-2 text-sm bg-gray-200 dark:bg-zinc-700 text-gray-400 dark:text-zinc-500 rounded-lg cursor-not-allowed select-none"
+                  >
+                    Adjust & re-run
+                  </span>
+                ) : (
+                  <button
+                    onClick={handleRestart}
+                    disabled={restartLoading}
+                    className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {restartLoading ? "Restarting…" : "Adjust & re-run"}
+                  </button>
+                )
+              )}
+              {onUploadNew && (
+                <button
+                  onClick={onUploadNew}
+                  className="px-4 py-2 text-sm border border-red-300 dark:border-red-700 text-red-700 dark:text-red-400 rounded-lg hover:bg-red-100 dark:hover:bg-red-900"
+                >
+                  Upload new file
+                </button>
+              )}
+              {restartError && <p className="text-red-500 text-sm">{restartError}</p>}
+            </div>
           </div>
         )}
 
@@ -389,10 +454,21 @@ export function RunDetailView({
       </div>
 
       {status === "AWAITING_REVIEW" && activeTab === "recommendations" && runData.recommendations_generated && (
-        <>
-          {submitError && <p className="text-red-500 text-sm px-6 py-1">{submitError}</p>}
-          <SubmitBar onSubmit={handleSubmit} loading={submitLoading} />
-        </>
+        runData.source_expired ? (
+          <div className="flex-shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 px-4 py-3.5 flex justify-end">
+            <span
+              title="Source file expired — transformations can no longer be applied after 7 days"
+              className="px-5 py-2 text-sm bg-gray-200 dark:bg-zinc-700 text-gray-400 dark:text-zinc-500 rounded-lg font-medium cursor-not-allowed select-none"
+            >
+              Source file expired
+            </span>
+          </div>
+        ) : (
+          <>
+            {submitError && <p className="text-red-500 text-sm px-6 py-1">{submitError}</p>}
+            <SubmitBar onSubmit={handleSubmit} loading={submitLoading} />
+          </>
+        )
       )}
     </div>
   )

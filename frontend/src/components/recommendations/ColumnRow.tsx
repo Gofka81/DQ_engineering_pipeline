@@ -91,7 +91,12 @@ export function ColumnRow({ name, config, onChange }: Props) {
         <td className="px-3 py-2">
           <select
             value={config.type}
-            onChange={(e) => onChange({ type: e.target.value as ColumnConfig["type"] })}
+            onChange={(e) => {
+              const newType = e.target.value as ColumnConfig["type"]
+              const patch: Partial<ColumnConfig> = { type: newType }
+              if (newType !== "int" && newType !== "float") patch.normalize = false
+              onChange(patch)
+            }}
             className={selectCls}
           >
             {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -129,15 +134,19 @@ export function ColumnRow({ name, config, onChange }: Props) {
           })()}
         </td>
 
-        {/* Normalize */}
+        {/* Normalize — only numeric types can be normalised */}
         <td className="px-3 py-2">
-          <select
-            value={normalizeVal}
-            onChange={(e) => handleNormalize(e.target.value)}
-            className={selectCls}
-          >
-            {NORMALIZE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
+          {(config.type === "int" || config.type === "float") ? (
+            <select
+              value={normalizeVal}
+              onChange={(e) => handleNormalize(e.target.value)}
+              className={selectCls}
+            >
+              {NORMALIZE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          ) : (
+            <span className="text-xs text-gray-400 dark:text-zinc-600">—</span>
+          )}
         </td>
 
         {/* Rename */}
