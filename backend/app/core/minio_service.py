@@ -27,11 +27,14 @@ class MinioService:
             secret_key=settings.MINIO_ROOT_PASSWORD.get_secret_value(),
             secure=settings.MINIO_SECURE,
         )
+        public_url = settings.MINIO_PUBLIC_ENDPOINT or settings.MINIO_ENDPOINT
+        public_secure = public_url.startswith("https://") if settings.MINIO_PUBLIC_ENDPOINT else settings.MINIO_SECURE
+        public_endpoint = public_url.split("://", 1)[-1] if "://" in public_url else public_url
         self.presign_client = Minio(
-            endpoint=settings.MINIO_PUBLIC_ENDPOINT or settings.MINIO_ENDPOINT,
+            endpoint=public_endpoint,
             access_key=settings.MINIO_ROOT_USER,
             secret_key=settings.MINIO_ROOT_PASSWORD.get_secret_value(),
-            secure=bool(settings.MINIO_PUBLIC_ENDPOINT),
+            secure=public_secure,
         )
         self.raw_bucket = settings.MINIO_RAW_BUCKET
         self.curated_bucket = settings.MINIO_CURATED_BUCKET
