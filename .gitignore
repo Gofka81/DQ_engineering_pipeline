@@ -46,3 +46,12 @@ dask-worker-space/
 # Logs
 *.log
 /frontend/node_modules/
+/dissertation
+/diff_data/
+/test_data/crm_contacts_xlarge.csv
+/test_data/ecomm_orders_small.csv
+/test_data/finance_txn_medium.csv
+/test_data/iot_sensors_large.csv
+/test_data/medical_labs_medium.csv
+/test_data/opaque_fields.csv
+/test_data/retail_catalog_wide.csv

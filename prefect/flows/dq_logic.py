@@ -273,6 +273,13 @@ def apply_recommendations(df: pd.DataFrame, recommendations: dict[str, Any]) -> 
     duplicates = recommendations.get("duplicates", {})
 
     # ------------------------------------------------------------------
+    # 0. Strip leading/trailing whitespace from all string columns
+    # ------------------------------------------------------------------
+    # Normalises string values before sentinel replacement and type casting.
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].map(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # ------------------------------------------------------------------
     # 0. Replace numeric sentinel values with NaN
     # ------------------------------------------------------------------
     # Sentinel values (e.g. -999.0, 9999) are validity violations — they are
@@ -375,9 +382,11 @@ def apply_recommendations(df: pd.DataFrame, recommendations: dict[str, Any]) -> 
         fill_value = fill_def.get("value")
 
         if strategy == "median":
-            df[col] = df[col].fillna(df[col].median())
+            numeric = pd.to_numeric(df[col], errors="coerce")
+            df[col] = numeric.fillna(numeric.median())
         elif strategy == "mean":
-            df[col] = df[col].fillna(df[col].mean())
+            numeric = pd.to_numeric(df[col], errors="coerce")
+            df[col] = numeric.fillna(numeric.mean())
         elif strategy == "mode":
             mode = df[col].mode()
             if len(mode) > 0:
@@ -419,10 +428,11 @@ def apply_recommendations(df: pd.DataFrame, recommendations: dict[str, Any]) -> 
         upper = outlier_def.get("upper")
         if lower is None or upper is None:
             continue
+        numeric = pd.to_numeric(df[col], errors="coerce")
         if strategy in ("winsorise", "cap"):
-            df[col] = df[col].clip(lower=lower, upper=upper)
+            df[col] = numeric.clip(lower=lower, upper=upper)
         elif strategy == "remove":
-            df = df[(df[col].isna()) | ((df[col] >= lower) & (df[col] <= upper))]
+            df = df[numeric.isna() | ((numeric >= lower) & (numeric <= upper))]
 
     # ------------------------------------------------------------------
     # 4. Deduplicate

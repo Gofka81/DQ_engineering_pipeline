@@ -714,6 +714,12 @@ def enrich_recommendations(
             continue
 
         known_outlier_columns = set(base_recommendations.get("outliers", {}).keys())
+        if isinstance(llm_diff.get("outliers"), dict):
+            llm_diff["outliers"] = {
+                col: outlier_def
+                for col, outlier_def in llm_diff["outliers"].items()
+                if col in known_outlier_columns
+            }
         valid, err = validate_llm_output(llm_diff, known_columns, known_outlier_columns)
         if not valid:
             logger.warning(f"Runner attempt {attempt + 1} failed validation: {err}")
@@ -1077,7 +1083,10 @@ def generate_transform_code(
                 )
                 previous_code = ""
                 previous_error = str(e)
+                time.sleep(12)
                 continue
+
+            time.sleep(12)
 
             # Strip markdown fences if present
             code = raw
