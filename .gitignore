@@ -42,3 +42,10 @@ dask-worker-space/
 
 /prefect.yaml
 /CLAUDE.md
+
+# Logs
+*.log
+/frontend/node_modules/
+/dissertation
+/diff_data/
+/dissertation/docs/

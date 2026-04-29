@@ -27,6 +27,12 @@ class MinioService:
             secret_key=settings.MINIO_ROOT_PASSWORD.get_secret_value(),
             secure=settings.MINIO_SECURE,
         )
+        self.presign_client = Minio(
+            endpoint=settings.MINIO_PUBLIC_ENDPOINT or settings.MINIO_ENDPOINT,
+            access_key=settings.MINIO_ROOT_USER,
+            secret_key=settings.MINIO_ROOT_PASSWORD.get_secret_value(),
+            secure=bool(settings.MINIO_PUBLIC_ENDPOINT),
+        )
         self.raw_bucket = settings.MINIO_RAW_BUCKET
         self.curated_bucket = settings.MINIO_CURATED_BUCKET
 
@@ -109,7 +115,7 @@ class MinioService:
         bucket = bucket or self.curated_bucket
 
         try:
-            url = self.client.presigned_get_object(
+            url = self.presign_client.presigned_get_object(
                 bucket_name=bucket,
                 object_name=object_name,
                 expires=timedelta(hours=expires_hours),

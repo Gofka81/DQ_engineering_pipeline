@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Enum
+from sqlalchemy import Column, String, DateTime, ForeignKey, Enum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -30,9 +30,9 @@ class Run(Base):
         index=True,
     )
 
-    # DQ scores
-    dq_score_before = Column(Float, nullable=True)
-    dq_score_after = Column(Float, nullable=True)
+    # DQ scores (JSONB: {overall, completeness, uniqueness, validity, consistency})
+    dq_scores_before = Column(JSONB, nullable=True)
+    dq_scores_after = Column(JSONB, nullable=True)
 
     # Recommendations as JSONB
     recommendations_generated = Column(JSONB, nullable=True)

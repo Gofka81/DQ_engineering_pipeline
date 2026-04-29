@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # Environment
     ENVIRONMENT: str = Field(default="development")
+    CORS_ORIGINS: list[str] = Field(default=["*"])
 
     # PostgreSQL
     POSTGRES_HOST: str = Field(default="localhost")
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
 
     # MinIO
     MINIO_ENDPOINT: str = Field(default="localhost:9000")
+    MINIO_PUBLIC_ENDPOINT: Optional[str] = Field(default=None)
     MINIO_ROOT_USER: str = Field(default="minioadmin")
     MINIO_ROOT_PASSWORD: SecretStr = Field(default="minioadmin")
     MINIO_RAW_BUCKET: str = Field(default="raw")
@@ -45,7 +47,7 @@ class Settings(BaseSettings):
     # Redis
     REDIS_HOST: str = Field(default="localhost")
     REDIS_PORT: int = Field(default=6379)
-    REDIS_DQ_QUEUE: str = Field(default="dq_jobs")
+    REDIS_JOBS_QUEUE: str = Field(default="jobs")
 
     # Optional: full async DSN
     DATABASE_URL: Optional[PostgresDsn] = None

@@ -1,0 +1,81 @@
+f001,f002,f003,f004,f005,f006,f007,f008
+john.doe@gmail.com,(212) 555-0182,2023-11-24,2024-04-13,New York,81.01,active,2
+alice.smith@yahoo.com,(415) 555-0143,2024-01-13,2024-10-19,Los Angeles,35.2,active,4
+bob.jones@company.com,(312) 555-0177,2023-01-17,,Chicago,73.4,active,5
+maria.garcia@hotmail.com,(713) 555-0191,2023-11-05,,Houston,67.65,churned,5
+james.wilson@outlook.com,(305) 555-0134,2023-08-03,2023-12-24,Miami,244.72,trial,1
+sarah.brown@gmail.com,(617) 555-0156,2024-01-24,2024-08-28,Boston,108.66,active,2
+david.lee@company.org,,2023-04-21,2023-10-11,Denver,39.63,churned,4
+emma.davis@email.com,(949) 555-0128,2023-02-19,2023-08-15,Seattle,185.07,active,1
+,(303) 555-0165,2024-01-09,2024-03-13,Phoenix,292.19,trial,4
+carlos.ruiz@gmail.com,(206) 555-0149,2023-02-10,2023-08-15,Atlanta,177.42,active,1
+john.doe@gmail.com,(212) 555-0182,2023-01-24,2023-06-22,New York,295.7,active,2
+alice.smith@yahoo.com,(415) 555-0143,2024-03-19,2024-08-09,Los Angeles,141.48,active,3
+bob.jones@company.com,(312) 555-0177,2023-03-25,2023-07-11,Chicago,204.34,active,1
+maria.garcia@hotmail.com,(713) 555-0191,2023-11-08,2024-08-08,Houston,221.44,churned,2
+james.wilson@outlook.com,(305) 555-0134,2023-08-25,2024-06-06,Miami,73.68,trial,3
+sarah.brown@gmail.com,(617) 555-0156,2024-03-07,2024-04-05,Boston,76.41,active,1
+david.lee@company.org,,2024-02-17,2024-07-04,Denver,29.18,churned,5
+emma.davis@email.com,(949) 555-0128,2024-03-24,2024-07-11,Seattle,200.07,active,4
+,(303) 555-0165,2024-03-28,2024-11-18,Phoenix,51.42,trial,2
+carlos.ruiz@gmail.com,(206) 555-0149,2023-05-07,2024-02-07,Atlanta,86.19,active,5
+john.doe@gmail.com,(212) 555-0182,2023-08-08,2024-02-29,New York,114.97,active,2
+alice.smith@yahoo.com,(415) 555-0143,2023-09-18,2023-10-13,Los Angeles,259.71,active,2
+bob.jones@company.com,(312) 555-0177,2023-11-18,2024-06-22,Chicago,182.95,active,4
+maria.garcia@hotmail.com,(713) 555-0191,2023-07-15,2024-03-11,Houston,163.43,churned,5
+james.wilson@outlook.com,(305) 555-0134,2024-03-16,2024-05-14,Miami,207.69,trial,5
+sarah.brown@gmail.com,(617) 555-0156,2024-01-20,2024-07-13,Boston,42.34,active,4
+david.lee@company.org,,2023-03-22,2023-08-04,Denver,291.84,churned,2
+emma.davis@email.com,(949) 555-0128,2023-09-17,2024-02-17,Seattle,254.07,active,5
+,(303) 555-0165,2023-11-08,2024-05-18,Phoenix,231.12,trial,5
+carlos.ruiz@gmail.com,(206) 555-0149,2024-05-03,2025-01-30,Atlanta,276.35,active,5
+john.doe@gmail.com,(212) 555-0182,2023-06-15,2023-08-12,New York,279.43,active,3
+alice.smith@yahoo.com,(415) 555-0143,2023-05-03,,Los Angeles,264.61,active,1
+bob.jones@company.com,(312) 555-0177,2023-02-13,2023-03-21,Chicago,293.61,active,5
+maria.garcia@hotmail.com,(713) 555-0191,2024-01-28,2024-09-28,Houston,284.58,churned,2
+james.wilson@outlook.com,(305) 555-0134,2023-05-16,2023-12-19,Miami,289.66,trial,5
+sarah.brown@gmail.com,(617) 555-0156,2024-01-22,2024-05-04,Boston,216.75,active,4
+david.lee@company.org,,2023-12-10,2024-07-22,Denver,270.88,churned,4
+emma.davis@email.com,(949) 555-0128,2023-03-03,2023-04-05,Seattle,108.03,active,5
+,(303) 555-0165,2023-10-11,2024-02-01,Phoenix,12.08,trial,1
+carlos.ruiz@gmail.com,(206) 555-0149,2023-04-28,,Atlanta,19.1,active,3
+john.doe@gmail.com,(212) 555-0182,2023-02-06,2023-06-29,New York,203.99,active,2
+alice.smith@yahoo.com,(415) 555-0143,2023-10-04,2024-07-23,Los Angeles,177.09,active,2
+bob.jones@company.com,(312) 555-0177,2024-02-06,2024-09-02,Chicago,65.21,active,1
+maria.garcia@hotmail.com,(713) 555-0191,2023-12-04,2024-07-08,Houston,129.21,churned,1
+james.wilson@outlook.com,(305) 555-0134,2023-12-11,2024-01-31,Miami,27.57,trial,3
+sarah.brown@gmail.com,(617) 555-0156,2024-02-14,2024-06-21,Boston,65.55,active,5
+david.lee@company.org,,2023-08-18,2023-11-20,Denver,90.77,churned,2
+emma.davis@email.com,(949) 555-0128,2024-03-23,2024-11-05,Seattle,244.32,active,5
+,(303) 555-0165,2023-02-20,,Phoenix,299.78,trial,1
+carlos.ruiz@gmail.com,(206) 555-0149,2024-05-11,,Atlanta,228.52,active,2
+john.doe@gmail.com,(212) 555-0182,2023-03-27,2023-11-29,New York,71.98,active,4
+alice.smith@yahoo.com,(415) 555-0143,2024-04-07,,Los Angeles,119.89,active,4
+bob.jones@company.com,(312) 555-0177,2023-05-16,2024-01-04,Chicago,92.71,active,5
+maria.garcia@hotmail.com,(713) 555-0191,2023-12-05,2024-02-23,Houston,65.06,churned,2
+james.wilson@outlook.com,(305) 555-0134,2024-05-10,,Miami,223.35,trial,1
+sarah.brown@gmail.com,(617) 555-0156,2024-01-18,2024-02-13,Boston,179.4,active,5
+david.lee@company.org,,2024-04-15,2024-07-05,Denver,26.49,churned,5
+emma.davis@email.com,(949) 555-0128,2023-02-11,2023-03-19,Seattle,182.55,active,2
+,(303) 555-0165,2023-07-26,2024-05-13,Phoenix,81.39,trial,5
+carlos.ruiz@gmail.com,(206) 555-0149,2023-01-21,2023-08-24,Atlanta,200.63,active,5
+john.doe@gmail.com,(212) 555-0182,2023-09-25,2024-02-06,New York,69.23,active,3
+alice.smith@yahoo.com,(415) 555-0143,2023-05-03,2023-07-10,Los Angeles,204.78,active,3
+bob.jones@company.com,(312) 555-0177,2023-08-23,2023-09-30,Chicago,12.69,active,5
+maria.garcia@hotmail.com,(713) 555-0191,2023-10-16,2023-11-23,Houston,165.9,churned,5
+james.wilson@outlook.com,(305) 555-0134,2023-05-16,2023-11-11,Miami,265.44,trial,2
+sarah.brown@gmail.com,(617) 555-0156,2023-07-09,2024-02-19,Boston,251.78,active,3
+david.lee@company.org,,2023-11-10,2024-08-07,Denver,12.26,churned,5
+emma.davis@email.com,(949) 555-0128,2023-06-03,2023-07-27,Seattle,282.28,active,2
+,(303) 555-0165,2023-05-16,2023-07-10,Phoenix,225.29,trial,2
+carlos.ruiz@gmail.com,(206) 555-0149,2023-05-20,2023-09-05,Atlanta,218.1,active,2
+john.doe@gmail.com,(212) 555-0182,2023-12-18,2024-05-02,New York,156.56,active,3
+alice.smith@yahoo.com,(415) 555-0143,2024-04-08,2024-05-05,Los Angeles,36.76,active,4
+bob.jones@company.com,(312) 555-0177,2024-02-29,2024-03-02,Chicago,106.72,active,2
+maria.garcia@hotmail.com,(713) 555-0191,2023-11-23,2024-02-14,Houston,224.95,churned,5
+james.wilson@outlook.com,(305) 555-0134,2023-12-28,2024-01-02,Miami,42.43,trial,2
+sarah.brown@gmail.com,(617) 555-0156,2023-10-07,,Boston,117.06,active,5
+david.lee@company.org,,2023-03-17,2023-04-08,Denver,99.38,churned,1
+emma.davis@email.com,(949) 555-0128,2024-04-05,2024-08-11,Seattle,203.4,active,3
+,(303) 555-0165,2024-02-04,2024-08-31,Phoenix,292.4,trial,2
+carlos.ruiz@gmail.com,(206) 555-0149,2024-04-18,2024-07-11,Atlanta,293.09,active,2

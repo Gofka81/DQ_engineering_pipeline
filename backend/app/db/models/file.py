@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, BigInteger, DateTime, Integer, ForeignKey
+from sqlalchemy import Boolean, Column, String, BigInteger, DateTime, Integer, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -16,6 +16,7 @@ class File(Base):
     minio_raw_path = Column(String(512), nullable=False)
     file_size = Column(BigInteger, nullable=False)
     content_type = Column(String(100), default="text/csv")
+    has_header = Column(Boolean, nullable=False, server_default="TRUE")
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

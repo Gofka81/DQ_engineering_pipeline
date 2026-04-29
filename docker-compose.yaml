@@ -13,6 +13,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/postgres-init.sh
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U prefect"]
       interval: 5s
@@ -30,9 +32,15 @@ services:
         condition: service_healthy
     environment:
       PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres-prefect:5432/prefect
-      PREFECT_UI_API_URL: http://127.0.0.1:4200/api
+      PREFECT_UI_API_URL: ${PREFECT_UI_API_URL:-http://localhost:4200/api}
       PREFECT_API_URL: http://prefect-server:4200/api   # internal
     command: prefect server start --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   prefect-worker:
     build:
@@ -41,23 +49,35 @@ services:
     container_name: prefect-worker
     restart: unless-stopped
     depends_on:
-      - prefect-server
-      - redis
-      - postgres-prefect
-      - minio
+      prefect-server:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      postgres-prefect:
+        condition: service_healthy
+      minio:
+        condition: service_started
     volumes:
-      - ./prefect:/prefect
-    env_file:
-      - .env
+      - logs:/logs
     environment:
       # Prefect settings
       PREFECT_API_URL: http://prefect-server:4200/api
       PREFECT_RESULTS_DEFAULT_SERIALIZER: "pickle"
       PREFECT_RESULTS_PERSIST_BY_DEFAULT: "true"
+      PYTHONPATH: /prefect
       # Override hostnames for Docker network
       POSTGRES_HOST: postgres
       MINIO_ENDPOINT: minio:9000
       REDIS_HOST: redis
+      # Injected from Portainer UI / .env
+      POSTGRES_USER: ${POSTGRES_USER:-prefect}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefect}
+      BACKEND_DB: ${BACKEND_DB:-backend}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_JOBS_QUEUE: ${REDIS_JOBS_QUEUE:-jobs}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      LLM_API_KEY: ${LLM_API_KEY:-}
     command: >
       bash -c "
       prefect deploy --all &&
@@ -66,7 +86,7 @@ services:
       trap 'kill -TERM $$REDIS_PID $$PREFECT_PID 2>/dev/null' TERM INT &&
       prefect worker start --pool default-agent-pool &
       PREFECT_PID=$$! &&
-      wait -n &&
+      wait -n $$REDIS_PID $$PREFECT_PID &&
       kill -TERM $$REDIS_PID $$PREFECT_PID 2>/dev/null
       "
 
@@ -97,7 +117,53 @@ services:
       timeout: 20s
       retries: 3
 
+  backend:
+    container_name: backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8020:8000"
+    depends_on:
+      postgres-prefect:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    environment:
+      POSTGRES_HOST: postgres
+      MINIO_ENDPOINT: minio:9000
+      REDIS_HOST: redis
+      # Injected from Portainer UI / .env
+      POSTGRES_USER: ${POSTGRES_USER:-prefect}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefect}
+      BACKEND_DB: ${BACKEND_DB:-backend}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_JOBS_QUEUE: ${REDIS_JOBS_QUEUE:-jobs}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
+      SECRET_KEY: ${SECRET_KEY:-change-this-secret}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-200}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+
+  frontend:
+    container_name: frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
 volumes:
   postgres-data:
   redis-data:
   minio-data:
+  logs:

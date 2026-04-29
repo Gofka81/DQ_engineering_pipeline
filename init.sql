@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS files (
     minio_raw_path    VARCHAR(512) NOT NULL,
     file_size         BIGINT NOT NULL,
     content_type      VARCHAR(100) DEFAULT 'text/csv',
+    has_header        BOOLEAN NOT NULL DEFAULT TRUE,
     uploaded_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -43,8 +44,8 @@ CREATE TABLE IF NOT EXISTS runs (
     id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     file_id                   UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     status                    run_status DEFAULT 'PENDING' NOT NULL,
-    dq_score_before           FLOAT,
-    dq_score_after            FLOAT,
+    dq_scores_before          JSONB,
+    dq_scores_after           JSONB,
     recommendations_generated JSONB,
     recommendations_approved  JSONB,
     minio_curated_path        VARCHAR(512),

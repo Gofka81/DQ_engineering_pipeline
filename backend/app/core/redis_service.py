@@ -1,5 +1,4 @@
 import json
-from typing import Any
 
 import redis
 
@@ -24,28 +23,19 @@ class RedisService:
             port=settings.REDIS_PORT,
             decode_responses=True,
         )
-        self.dq_queue = settings.REDIS_DQ_QUEUE
+        self.jobs_queue = settings.REDIS_JOBS_QUEUE
         self._initialized = True
 
-    def push_dq_job(self, run_id, file_id, minio_path: str) -> None:
-        """Push a DQ analysis job to the queue."""
+    def push_job(self, job_type: str, run_id, file_id, minio_path: str, has_header: bool = True) -> None:
+        """Push a job to the shared queue. job_type: 'dq_analysis' | 'transform'."""
         job = {
-            "run_id": str(run_id),  # Convert UUID to string
-            "file_id": str(file_id),  # Convert UUID to string
+            "job_type":   job_type,
+            "run_id":     str(run_id),
+            "file_id":    str(file_id),
             "minio_path": minio_path,
+            "has_header": has_header,
         }
-        self.client.lpush(self.dq_queue, json.dumps(job))
-
-    def pop_dq_job(self, timeout: int = 0) -> dict[str, Any] | None:
-        """
-        Pop a DQ job from the queue (blocking).
-        timeout=0 means block forever until a job is available.
-        """
-        result = self.client.brpop(self.dq_queue, timeout=timeout)
-        if result:
-            _, job_json = result
-            return json.loads(job_json)
-        return None
+        self.client.lpush(self.jobs_queue, json.dumps(job))
 
     def ping(self) -> bool:
         """Check Redis connection."""

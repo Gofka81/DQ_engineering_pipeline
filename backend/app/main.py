@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.core.config import settings
 from backend.app.api.auth import router as auth_router
@@ -11,6 +12,14 @@ app = FastAPI(
     description="API for user-guided data quality & transformation",
     version="0.1.0",
     docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
