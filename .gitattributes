@@ -1,0 +1,25 @@
+# Force LF for shell scripts and SQL — without this Git on Windows
+# (core.autocrlf=true) converts them to CRLF, which breaks Alpine containers
+# with "/bin/bash^M: bad interpreter" errors.
+*.sh    text eol=lf
+*.sql   text eol=lf
+
+# Standard text files
+*.py    text
+*.ts    text
+*.tsx   text
+*.json  text
+*.yaml  text
+*.yml   text
+*.md    text
+*.env   text
+*.txt   text
+*.css   text
+*.html  text
+
+# Binaries
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
