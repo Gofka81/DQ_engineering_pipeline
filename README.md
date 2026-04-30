@@ -104,7 +104,7 @@ Every column gets one dict. Blue fields are set by deterministic code; orange by
 ### 1. Clone
 
 ```bash
-git clone <repo-url>
+git clone [https://github.com/Gofka81/DQ_engineering_pipeline](https://github.com/Gofka81/DQ_engineering_pipeline)
 cd DQ_engineering_pipeline
 ```
 
