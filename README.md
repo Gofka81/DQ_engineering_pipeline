@@ -110,12 +110,18 @@ cd DQ_engineering_pipeline
 
 ### 2. Configure
 
+Linux / macOS:
 ```bash
 cp .env.example .env
 ```
 
+Windows:
+```cmd
+copy .env.example .env
+```
+
 Open `.env` and set:
-- `SECRET_KEY` — run `openssl rand -hex 32` to generate one
+- `SECRET_KEY` — generate with `openssl rand -hex 32` (Linux/macOS) or `python -c "import secrets; print(secrets.token_hex(32))"` (Windows)
 - `LLM_API_KEY` — your Groq key (leave empty to skip LLM enrichment)
 - If running on a remote machine, update the three IP-based URLs (see comments in `.env.example`)
 
