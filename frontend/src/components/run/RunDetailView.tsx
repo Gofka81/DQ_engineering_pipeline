@@ -189,7 +189,12 @@ export function RunDetailView({
 
   async function handleDownload() {
     const res = await getDownloadUrl(runData.id)
-    window.open(res.download_url, "_blank")
+    const a = document.createElement("a")
+    a.href = res.download_url
+    a.download = ""
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
   }
 
   const [restartLoading, setRestartLoading] = useState(false)
