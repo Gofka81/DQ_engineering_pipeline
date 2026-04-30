@@ -117,7 +117,7 @@ cp .env.example .env
 Open `.env` and set:
 - `SECRET_KEY` — run `openssl rand -hex 32` to generate one
 - `LLM_API_KEY` — your Groq key (leave empty to skip LLM enrichment)
-- If running on a Pi or remote machine, update the three IP-based URLs (see comments in `.env.example`)
+- If running on a remote machine, update the three IP-based URLs (see comments in `.env.example`)
 
 ### 3. Start
 
