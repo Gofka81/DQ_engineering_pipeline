@@ -121,9 +121,21 @@ copy .env.example .env
 ```
 
 Open `.env` and set:
-- `SECRET_KEY` — generate with `openssl rand -hex 32` (Linux/macOS) or `python -c "import secrets; print(secrets.token_hex(32))"` (Windows)
 - `LLM_API_KEY` — your Groq key (leave empty to skip LLM enrichment)
 - If running on a remote machine, update the three IP-based URLs (see comments in `.env.example`)
+
+`SECRET_KEY` — a random string used to sign JWT tokens. The default value in `.env.example` is fine for local testing; change it for any deployment accessible over a network. 
+To generate a strong key:
+
+Linux / macOS: 
+```bash
+openssl rand -hex 32
+```
+
+Windows:
+```cmd
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
 ### 3. Start
 
@@ -211,8 +223,7 @@ docker compose up -d --build frontend
 │
 ├── init.sql            # DB schema
 ├── docker-compose.yaml
-├── .env.example
-└── setup-pi.sh
+└── .env.example
 ```
 
 ---

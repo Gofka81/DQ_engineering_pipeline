@@ -1,3 +1,9 @@
+-- Create backend database (runs in the default 'prefect' DB context)
+SELECT 'CREATE DATABASE backend'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'backend')\gexec
+
+\c backend
+
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
     id              SERIAL PRIMARY KEY,
