@@ -41,6 +41,10 @@ class MinioService:
 
         self._ensure_bucket(self.raw_bucket)
         self._ensure_bucket(self.curated_bucket)
+
+        self.presign_client._region_map[self.raw_bucket] = "us-east-1"
+        self.presign_client._region_map[self.curated_bucket] = "us-east-1"
+
         self._initialized = True
 
     def _ensure_bucket(self, bucket_name: str) -> None:
