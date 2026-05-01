@@ -69,11 +69,11 @@ class RecommendationsSchema(BaseModel):
     columns: dict[str, ColumnConfig] = Field(default_factory=dict)
     duplicates: DuplicatesConfig | None = None
     outliers: dict[str, OutliersConfig] = Field(default_factory=dict)
-    # custom_transforms: pass-through — not strictly validated here
+    # custom_transforms: pass-through, not strictly validated here
     custom_transforms: list[dict[str, Any]] = Field(default_factory=list)
     # _metadata is pass-through
     metadata_: dict[str, Any] = Field(default_factory=dict, alias="_metadata")
-    # _eda is display-only — stored in DB but never read by apply_recommendations() or the LLM
+    # _eda is display-only. Stored in DB but never read by apply_recommendations() or the LLM.
     eda_: dict[str, Any] | None = Field(default=None, alias="_eda")
 
     model_config = {"populate_by_name": True}

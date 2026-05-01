@@ -160,7 +160,7 @@ def _sample_rows(df: pd.DataFrame) -> pd.DataFrame:
     """
     Return a representative sample of rows for LLM context.
 
-    Size: min(10% of rows, 25) — proportional for small datasets, capped for large ones.
+    Size: min(10% of rows, 25), proportional for small datasets, capped at 25 for large ones.
 
     Strategy:
       1. Null rows      — rows with any null (up to n//3); show the LLM missing-data patterns
@@ -254,7 +254,7 @@ def _build_llm_profile(profile: dict[str, Any], df: pd.DataFrame) -> str:
 
     # Split columns by detected type.
     # Date columns share the numeric profile shape (stats: min/max/mean) so
-    # they go into the numeric table — not the string table which has no stats.
+    # they go into the numeric table, not the string table which has no stats.
     numeric = {
         col: cp for col, cp in profile["column_profiles"].items()
         if cp.get("detected_type") in ("numeric", "date")
@@ -311,7 +311,7 @@ def _lean_baseline(recs: dict[str, Any]) -> dict[str, Any]:
     """
     Build a sparse version of the baseline recommendations for the LLM prompt.
 
-    The "columns" and "outliers" top-level keys are included — the LLM uses
+    The "columns" and "outliers" top-level keys are included. The LLM uses
     both to enrich column strategies and add domain notes to outlier entries.
     _eda, _metadata, duplicates, custom_transforms are excluded.
 
@@ -325,7 +325,7 @@ def _lean_baseline(recs: dict[str, Any]) -> dict[str, Any]:
 
     Outlier entries include strategy/count/bounds only (note is LLM-set).
 
-    Also switches to compact JSON (no indent) — caller passes the result
+    Also switches to compact JSON (no indent). Caller passes the result
     to json.dumps with separators=(",",":").
     """
     columns: dict[str, Any] = {}
@@ -381,8 +381,8 @@ def _runner(
     """
     One LLM call to generate (or fix) the partial recommendations diff.
 
-    Returns raw string — may or may not be valid JSON.
-    Lets exceptions propagate — caller handles.
+    Returns a raw string that may or may not be valid JSON.
+    Exceptions propagate to the caller.
     """
     base_recs_json = json.dumps(_lean_baseline(base_recs), separators=(",", ":"), default=str)
 
@@ -435,7 +435,7 @@ def _runner(
 
 # ---------------------------------------------------------------------------
 # Validator
-# NOTE: _RUNNER_SYSTEM schema must stay in sync with validate_llm_output().
+# _RUNNER_SYSTEM schema must stay in sync with validate_llm_output().
 # ---------------------------------------------------------------------------
 
 _VALID_TYPES = {"int", "float", "string", "date", "bool"}
@@ -450,7 +450,7 @@ def validate_llm_output(
     """
     Structural validation of the LLM partial diff.
 
-    Accepts {"columns": {...}, "outliers": {...}} — at least one key required.
+    Accepts {"columns": {...}, "outliers": {...}}. At least one key is required.
     Only changed columns/outlier entries are expected; only changed keys within
     each column.
 
@@ -553,8 +553,8 @@ def _rename_runner(
     Separate LLM call for column renaming.
 
     Builds per-column input: "col (type): val1, val2, val3"
-    Returns {old_col: new_name} — only columns that should be renamed.
-    Empty dict on any failure (soft fail — never raises).
+    Returns {old_col: new_name} for columns that should be renamed.
+    Returns an empty dict on any failure. Never raises.
     """
     known_columns = set(profile["column_profiles"].keys())
 
@@ -646,11 +646,11 @@ def enrich_recommendations(
     """
     Enrich code-generated recommendations using an LLM (Runner → Validator → merge).
 
-    The LLM returns a partial diff — only changed columns and only changed keys.
+    The LLM returns a partial diff of only changed columns and only changed keys.
     We deep-merge that diff onto the baseline so _metadata, duplicates, and
     custom_transforms always come from the baseline.
 
-    Soft failure contract — never raises. Returns base_recommendations if:
+    Never raises (soft failure). Returns base_recommendations if:
     - LLM_API_KEY is not set
     - groq package is not installed
     - All 3 runner attempts produce invalid output
@@ -727,7 +727,6 @@ def enrich_recommendations(
             validation_error = err
             continue
 
-        # Ensure "columns" key is always present for the processing loops below
         llm_diff.setdefault("columns", {})
 
         # Strip keys that are identical to the baseline (LLM sometimes echoes unchanged keys)
@@ -738,7 +737,7 @@ def enrich_recommendations(
                 for k in echoed:
                     del col_diff[k]
 
-        # Strip missing_values when baseline has null (column has no nulls — baseline is authoritative).
+        # Strip missing_values when baseline has null. Baseline is authoritative for zero-null columns.
         # The LLM sometimes adds an imputation strategy for zero-null columns.
         for col, col_diff in llm_diff["columns"].items():
             if "missing_values" in col_diff:
@@ -747,7 +746,7 @@ def enrich_recommendations(
                     logger.debug("Stripped missing_values for '%s' — baseline has no nulls", col)
                     del col_diff["missing_values"]
 
-        # Protect leave_null set by MAR detection — code precedence is higher than LLM.
+        # Protect leave_null set by MAR detection. Code precedence is higher than LLM.
         # The LLM cannot override leave_null to a fill strategy; it can still set leave_null
         # itself (making a non-MAR column intentionally null), but cannot undo a MAR decision.
         for col, col_diff in llm_diff["columns"].items():
@@ -760,7 +759,7 @@ def enrich_recommendations(
 
         # Drop columns where only a note remains (note without a real change is noise)
         # and columns where nothing changed at all.
-        # transform_hint is substantive — a column with only transform_hint + note is kept.
+        # transform_hint counts as a substantive change. A column with only transform_hint + note is kept.
         _SUBSTANTIVE_KEYS = {"type", "nullable", "missing_values", "transform_hint"}
         llm_diff["columns"] = {
             col: col_diff
@@ -787,12 +786,12 @@ def enrich_recommendations(
                         enriched["columns"][col]["missing_values"].update(val)
                     else:
                         enriched["columns"][col][key] = val
-                # Clear stale warnings when LLM changed the strategy — the old warnings
+                # Clear stale warnings when LLM changed the strategy. The old warnings
                 # were generated for the baseline strategy and are now contradictory.
                 if "missing_values" in col_diff:
                     enriched["columns"][col]["warnings"] = []
 
-        # Merge outlier notes from LLM (only "note" is accepted — strategy/count/bounds are read-only)
+        # Merge outlier notes from LLM. Strategy, count, and bounds are read-only.
         for col, outlier_diff in llm_diff.get("outliers", {}).items():
             if col in enriched["outliers"]:
                 note = outlier_diff.get("note")
@@ -843,7 +842,7 @@ def enrich_recommendations(
 
 
 # ---------------------------------------------------------------------------
-# Custom transform code generation (4.8)
+# Custom transform code generation
 # ---------------------------------------------------------------------------
 
 _TRANSFORM_SYSTEM = """\
@@ -923,7 +922,7 @@ def _test_transform(code: str, series: pd.Series) -> tuple[bool, str]:
       6. nulls    — original null positions must remain null (catches NaN → "None" string)
       7. ok       — all checks passed
 
-    Returns (True, "") on success or (False, reason) on failure — never raises.
+    Returns (True, "") on success or (False, reason) on failure. Never raises.
     """
     n_rows = len(series)
     n_nonnull = int(series.notna().sum())
@@ -993,7 +992,7 @@ def generate_transform_code(
     For each column with a transform_hint, call the LLM to generate a validated
     pandas lambda, then store it as transform_code in the column dict.
 
-    Soft-fail contract — never raises. Returns recommendations unchanged if:
+    Soft-fail contract. Never raises. Returns recommendations unchanged if:
     - LLM_API_KEY is not set
     - groq package is not installed
     - All 3 attempts fail for a column (that column is skipped silently)

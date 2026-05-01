@@ -98,7 +98,7 @@ async def upload_file(
         content_type="text/csv",
     )
 
-    # Create file record — pass id explicitly so DB and MinIO share the same UUID
+    # Create file record. Pass id explicitly so DB and MinIO share the same UUID.
     db_file = FileModel(
         id=file_id,
         user_id=current_user.id,
@@ -592,7 +592,7 @@ async def restart_run(
     # Fall back to auto-generated if the run never reached the transform step.
     if source.recommendations_approved:
         new_recs = dict(source.recommendations_approved)
-        # Restore _eda from generated — required for the EDA dashboard tab
+        # Restore _eda from generated. Required for the EDA dashboard tab.
         generated = dict(source.recommendations_generated)
         if "_eda" not in new_recs and "_eda" in generated:
             new_recs["_eda"] = generated["_eda"]
@@ -609,7 +609,7 @@ async def restart_run(
     await db.commit()
     await db.refresh(new_run)
 
-    # Copy drop masks to the new run path — best-effort, 404 is handled gracefully
+    # Copy drop masks to the new run path. Best-effort, 404 is handled gracefully.
     try:
         from minio.commonconfig import CopySource
         minio.client.copy_object(
@@ -680,7 +680,7 @@ async def download_run_result(
 
 
 # ---------------------------------------------------------------------------
-# Bitset helpers (pure Python — no numpy in backend)
+# Bitset helpers (pure Python, no numpy in backend)
 # ---------------------------------------------------------------------------
 
 def _unpack_b64(b64: str, n_rows: int) -> bytearray:

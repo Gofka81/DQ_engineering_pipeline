@@ -1,5 +1,5 @@
 """
-DQ Analysis Prefect flow — task definitions and flow orchestration only.
+DQ Analysis Prefect flow. Task definitions and flow orchestration only.
 
 Business logic lives in flows/dq_logic.py.
 Client factories live in clients.py.
@@ -30,13 +30,13 @@ def load_dataframe_from_minio(minio_path: str, run_id: str, has_header: bool = T
     """
     Load CSV from MinIO into a pandas DataFrame.
 
-    Streams the MinIO response directly into pd.read_csv() — no intermediate
+    Streams the MinIO response directly into pd.read_csv() with no intermediate
     file on disk and no BytesIO copy. Malformed rows (mismatched field count)
     are skipped and counted rather than crashing the flow.
 
     Returns:
         df:             parsed DataFrame
-        malformed_rows: count of skipped rows (surfaced in profile)
+        malformed_rows: count of rows skipped for mismatched field count
     """
     logger = get_run_logger()
     log = _flog(run_id)
@@ -167,7 +167,7 @@ def enrich_with_llm(
         df: pd.DataFrame,
         run_id: str,
 ) -> dict[str, Any]:
-    """Enrich recommendations via LLM (Runner → Validator). Soft failure — returns base_recs on any error."""
+    """Enrich recommendations via LLM (Runner → Validator). On any error, returns base_recs unchanged."""
     logger = get_run_logger()
     log = _flog(run_id)
 
@@ -200,7 +200,7 @@ def upload_dropmasks(df: pd.DataFrame, profile: dict[str, Any], recs: dict[str, 
         client.put_object(bucket, path, io.BytesIO(dropmasks_bytes), len(dropmasks_bytes))
         log.info(f"[dropmasks] uploaded {len(dropmasks['ops'])} ops to {path}")
     except Exception as e:
-        # Non-critical — dropmask absence degrades gracefully (endpoint returns 404)
+        # Non-critical. Dropmask absence degrades gracefully (endpoint returns 404).
         log.warning(f"[dropmasks] upload failed (non-fatal): {e}")
 
 

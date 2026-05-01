@@ -1,5 +1,5 @@
 """
-Transform Prefect flow — applies approved recommendations to the raw CSV
+Transform Prefect flow. Applies approved recommendations to the raw CSV
 and saves the cleaned file to the MinIO curated bucket.
 
 Flow order:
@@ -87,7 +87,7 @@ async def load_approved_recommendations(run_id: str) -> dict[str, Any]:
         if row["recommendations_approved"] is None:
             log.error(f"[recs] run {run_id} has no approved recommendations")
             raise RuntimeError(f"Run {run_id} has no approved recommendations")
-        # asyncpg returns JSONB as a raw JSON string — decode it (Decision #23)
+        # asyncpg returns JSONB as a raw JSON string. Decode it (Decision #23).
         raw = row["recommendations_approved"]
         recommendations = json.loads(raw) if isinstance(raw, str) else dict(raw)
     finally:
@@ -327,7 +327,7 @@ async def save_transform_results_to_db(
 @flow(name="Transform", log_prints=True)
 async def transform_flow(run_id: str, file_id: str, minio_path: str, has_header: bool = True):
     """
-    Transform flow — applies user-approved recommendations and saves cleaned file.
+    Transform flow. Applies user-approved recommendations and saves cleaned file.
 
     Args:
         run_id:     UUID of the run record
