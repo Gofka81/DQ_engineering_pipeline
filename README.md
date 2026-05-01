@@ -139,7 +139,7 @@ docker compose logs -f prefect-worker
 #           Deployment 'transform' registered
 ```
 
-### 4. Open
+### 4. Web interfaces
 
 | Service | URL |
 |---|---|

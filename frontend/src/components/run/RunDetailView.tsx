@@ -294,6 +294,7 @@ export function RunDetailView({
                 )}
                 {activeTab === "recommendations" && (
                   <RecommendationsEditor
+                    key={runData.id}
                     runId={runData.id}
                     initialRecs={runData.recommendations_generated}
                     dqScoresBefore={dqBefore}
